@@ -110,6 +110,7 @@ Example output:
 
 ```bash
 deno task scrape "Extract product prices from example.com using .product-price"
+deno task scrape "Extract product prices from example.com" --config output-file-from-selector.json
 ```
 
 2. Install globally:
@@ -117,6 +118,7 @@ deno task scrape "Extract product prices from example.com using .product-price"
 ```bash
 deno task scrape:install
 scrape "Extract product prices from example.com using .product-price"
+scrape "Extract product prices from example.com" --config output-file-from-selector.json
 ```
 
 3. Run as web server:
