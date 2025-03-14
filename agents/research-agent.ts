@@ -186,22 +186,24 @@ let lastObservation = "";
 async function callOpenRouter(messages: ChatMessage[]): Promise<string> {
   try {
     console.log("Calling OpenRouter API...");
+    const options = {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: OPENROUTER_MODEL,
+        messages: messages,
+        stop: ["Observation:"], // Stop generation before the model writes an observation
+        temperature: DEFAULT_TEMPERATURE,
+        max_tokens: MAX_TOKENS,
+      }),
+    };
+    console.log(options);
     const response = await fetch(
       "https://openrouter.ai/api/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: OPENROUTER_MODEL,
-          messages: messages,
-          stop: ["Observation:"], // Stop generation before the model writes an observation
-          temperature: DEFAULT_TEMPERATURE,
-          max_tokens: MAX_TOKENS,
-        }),
-      }
+      options
     );
 
     if (!response.ok) {
