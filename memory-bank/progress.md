@@ -13,7 +13,26 @@
    - ✅ Markdown output with citations
    - ✅ Error handling with fallbacks
 
-2. **Agent Template**
+2. **Scraping Agent**
+
+   - ✅ Direct Puppeteer implementation
+   - ✅ Configuration-based scraping
+   - ✅ CLI mode operation
+   - ✅ Web server mode
+   - ✅ JSON output with structured data
+   - ✅ Error handling with fallbacks
+
+3. **Selector Finder Agent**
+
+   - ✅ Direct Puppeteer implementation
+   - ✅ Natural language query parsing
+   - ✅ Content-type aware selector generation
+   - ✅ CLI mode operation
+   - ✅ Web server mode
+   - ✅ Configuration file generation
+   - ✅ Markdown output with recommendations
+
+4. **Agent Template**
    - ✅ Base ReACT implementation
    - ✅ Tool system architecture
    - ✅ Dual-mode operation
@@ -42,9 +61,9 @@
 
 1. **Agent Enhancements**
 
-   - [ ] Additional specialized agents
-   - [ ] Enhanced tool capabilities
-   - [ ] Improved error recovery
+   - [x] Additional specialized agents (Scraping Agent, Selector Finder)
+   - [x] Enhanced tool capabilities
+   - [x] Improved error recovery
    - [ ] Advanced output formatting
 
 2. **Template Improvements**
@@ -182,12 +201,20 @@
 
 ### Last Update
 
-- Date: March 13, 2025
+- Date: March 14, 2025
 - Major Changes:
-  1. Initial project setup
-  2. Research agent implementation
-  3. Template creation
-  4. Memory bank documentation
+  1. Selector Finder Agent implementation
+     - Removed OpenRouter API dependency
+     - Added natural language query parsing
+     - Enhanced content-type awareness
+  2. Scraping Agent implementation
+     - Removed OpenRouter API dependency
+     - Improved error handling
+  3. Architectural improvements
+     - Removed find-selectors.ts (site-specific hard-coded scraper)
+     - Reinforced project philosophy of LLM-driven flexibility over hard-coded solutions
+  4. Memory bank documentation updates
+     - Updated systemPatterns.md with core philosophy section
 
 ### Next Steps
 
@@ -195,7 +222,7 @@
 
    - Complete documentation
    - Enhance error handling
-   - Add example agents
+   - Add more example agents
 
 2. Upcoming Work:
    - Testing framework

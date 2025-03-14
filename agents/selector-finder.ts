@@ -1,15 +1,15 @@
 /**
- * Single File ReAct Selector Finder Agent (Deno)
+ * Agentic Selector Finder (Deno)
  *
  * This agent analyzes web pages to find optimal CSS selectors for specific content.
- * It works in conjunction with the scraping agent to make web scraping more efficient
- * by automatically identifying the right selectors for extracting content.
+ * It uses a ReACT pattern (Reasoning, Action, Observation) to dynamically explore
+ * the DOM and determine appropriate selectors based on the user's query.
  *
  * ## Features
  * - Dual-mode operation (CLI and web server)
- * - ReACT pattern implementation (Thought → Action → Observation loop)
+ * - ReACT pattern implementation for DOM analysis
  * - Puppeteer integration for webpage analysis
- * - Automatic selector generation and testing
+ * - LLM-driven selector generation and testing
  * - Integration with scraping agent
  *
  * ## Setup
@@ -17,8 +17,8 @@
  * - Set the environment variable `OPENROUTER_API_KEY` with your OpenRouter API key
  * - (Optional) Set `OPENROUTER_MODEL` to specify the model (default is "openai/o3-mini-high")
  * - (Optional) Set `SERVER_API_KEY` to secure the web server API
- * - Run with: `deno run --allow-read --allow-write --allow-net --allow-env --allow-run selector-finder.ts`
- * - Install as command: `deno install --allow-read --allow-write --allow-net --allow-env --allow-run --global --name find-selector selector-finder.ts`
+ * - Run with: `deno run --allow-read --allow-write --allow-net --allow-env --allow-run --allow-sys selector-finder.ts`
+ * - Install as command: `deno install --allow-read --allow-write --allow-net --allow-env --allow-run --allow-sys --global --name find-selector selector-finder.ts`
  *
  * ## Usage
  * - CLI mode: `find-selector "Find selectors for product prices on example.com/products"`
@@ -26,7 +26,7 @@
  */
 
 import { serve } from "std/http/server.ts";
-import puppeteer, { ElementHandle, Page } from "puppeteer";
+import puppeteer from "npm:puppeteer";
 
 // Deno types
 declare const Deno: {
@@ -41,57 +41,42 @@ declare const Deno: {
 // ===== CONFIGURATION =====
 // Modify these settings to customize your agent
 
-// API Keys and Endpoints
-const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY") || ""; // Your OpenRouter API key
-const OPENROUTER_MODEL =
-  Deno.env.get("OPENROUTER_MODEL") || "openai/o3-mini-high"; // Model to use
+// Server Configuration
 const SERVER_API_KEY = Deno.env.get("SERVER_API_KEY") || ""; // Optional: Secure web server
 
 // Server Configuration
-const PORT = parseInt(Deno.env.get("PORT") || "8001"); // Web server port (different from scraping agent)
+const PORT = parseInt(Deno.env.get("PORT") || "8001"); // Web server port
 const SERVER_MODE_ENABLED = true; // Set to false to disable web server mode
 
-// Agent Configuration
-const MAX_STEPS = 10; // Maximum reasoning steps
-const DEFAULT_TEMPERATURE = 0.0; // Temperature for LLM calls
-const MAX_TOKENS = 4000; // Maximum tokens for responses
 
 // Analysis Configuration
-const PUPPETEER_TIMEOUT = 30000; // Timeout for Puppeteer operations (30 seconds)
+const PUPPETEER_TIMEOUT = 60000; // Timeout for Puppeteer operations (60 seconds)
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36";
-const MAX_ELEMENTS_TO_ANALYZE = 100; // Maximum number of elements to analyze
-const MIN_CONFIDENCE_SCORE = 0.5; // Minimum confidence score for selector recommendations
 
 // Output Configuration
 const INCLUDE_TIMESTAMP = true; // Include timestamp in output files
 
 // ===== INTERFACE DEFINITIONS =====
-// These define the structure of messages and tools
-
-interface ChatMessage {
-  role: "system" | "user" | "assistant";
-  content: string;
-}
-
 interface Tool {
   name: string;
   description: string;
   run: (input: string) => Promise<string> | string;
 }
 
-interface ElementInfo {
-  tagName: string;
-  id: string;
-  classes: string[];
-  attributes: Record<string, string>;
-  textContent: string;
-  innerHtml: string;
-  xpath: string;
+interface SelectorResult {
   selector: string;
-  role?: string;
-  type?: string;
-  name?: string;
+  count: number;
+  sample: string;
+}
+
+interface SelectorConfig {
+  selector: string;
+  waitFor?: string;
+  fields?: Record<string, {
+    selector: string;
+    attribute?: string;
+  }>;
 }
 
 interface SelectorRecommendation {
@@ -112,616 +97,972 @@ interface SelectorRecommendation {
 
 interface AnalysisResult {
   url: string;
-  description: string;
+  query: string;
   recommendations: SelectorRecommendation[];
 }
 
-// ===== HELPER FUNCTIONS =====
-// Utility functions for selector analysis
+// ===== DOM ANALYSIS TOOLS =====
+// These tools allow the LLM to explore and analyze the DOM
 
 /**
- * Extracts all relevant information about an element
+ * Creates the tools for DOM analysis
  */
-async function getElementInfo(element: ElementHandle): Promise<ElementInfo> {
-  const info = await element.evaluate((el: HTMLElement) => {
-    // Get element attributes
-    const attrs: Record<string, string> = {};
-    for (const attr of el.attributes) {
-      attrs[attr.name] = attr.value;
-    }
-
-    // Get xpath
-    function getXPath(element: HTMLElement): string {
-      if (element.id) {
-        return `//*[@id="${element.id}"]`;
-      }
-      if (element === document.body) {
-        return "/html/body";
-      }
-      if (!element.parentElement) {
-        return "";
-      }
-      const sameTagSiblings = Array.from(element.parentElement.children).filter(
-        (e: Element) => e.tagName === element.tagName
-      );
-      const idx = sameTagSiblings.indexOf(element) + 1;
-      return `${getXPath(
-        element.parentElement as HTMLElement
-      )}/${element.tagName.toLowerCase()}[${idx}]`;
-    }
-
-    // Get unique selector
-    function getSelector(element: HTMLElement): string {
-      if (element.id) {
-        return `#${element.id}`;
-      }
-      const classes = Array.from(element.classList).join(".");
-      if (classes) {
-        return `.${classes}`;
-      }
-      const tag = element.tagName.toLowerCase();
-      if (!element.parentElement) {
-        return tag;
-      }
-      const siblings = Array.from(element.parentElement.children).filter(
-        (e: Element) => e.tagName === element.tagName
-      );
-      const idx = siblings.indexOf(element) + 1;
-      return `${getSelector(
-        element.parentElement as HTMLElement
-      )} > ${tag}:nth-child(${idx})`;
-    }
-
-    return {
-      tagName: el.tagName.toLowerCase(),
-      id: el.id || "",
-      classes: Array.from(el.classList),
-      attributes: attrs,
-      textContent: el.textContent?.trim() || "",
-      innerHtml: el.innerHTML,
-      xpath: getXPath(el),
-      selector: getSelector(el),
-      role: el.getAttribute("role") || undefined,
-      type: el.getAttribute("type") || undefined,
-      name: el.getAttribute("name") || undefined,
-    };
-  });
-
-  return info;
-}
-
-/**
- * Calculates a confidence score for a selector based on various factors
- */
-function calculateConfidence(
-  selector: string,
-  matches: ElementInfo[],
-  description: string
-): number {
-  let score = 0;
-
-  // Prefer simpler selectors
-  score += 1 - selector.split(/[\s>]/).length / 10; // Max depth of 10
-
-  // Prefer ID-based selectors
-  if (selector.includes("#")) {
-    score += 0.3;
-  }
-
-  // Prefer class-based selectors
-  if (selector.includes(".")) {
-    score += 0.2;
-  }
-
-  // Prefer semantic selectors
-  if (matches.some((m) => m.role || m.type || m.name)) {
-    score += 0.2;
-  }
-
-  // Check if content matches description
-  const descriptionWords = description.toLowerCase().split(/\W+/);
-  const contentMatches = matches.some((m) =>
-    descriptionWords.some(
-      (word) =>
-        m.textContent.toLowerCase().includes(word) ||
-        m.attributes.title?.toLowerCase().includes(word) ||
-        m.attributes["aria-label"]?.toLowerCase().includes(word)
-    )
-  );
-  if (contentMatches) {
-    score += 0.3;
-  }
-
-  // Normalize score to 0-1 range
-  return Math.min(Math.max(score, 0), 1);
-}
-
-/**
- * Generates multiple potential selectors for an element
- */
-function generateSelectors(info: ElementInfo): string[] {
-  const selectors: string[] = [];
-
-  // ID selector
-  if (info.id) {
-    selectors.push(`#${info.id}`);
-  }
-
-  // Class selectors
-  if (info.classes.length > 0) {
-    selectors.push(`.${info.classes.join(".")}`);
-    // Try combinations of classes
-    if (info.classes.length > 1) {
-      for (const cls of info.classes) {
-        selectors.push(`.${cls}`);
-      }
-    }
-  }
-
-  // Attribute selectors
-  for (const [attr, value] of Object.entries(info.attributes)) {
-    if (attr !== "id" && attr !== "class") {
-      selectors.push(`[${attr}="${value}"]`);
-    }
-  }
-
-  // Role selectors
-  if (info.role) {
-    selectors.push(`[role="${info.role}"]`);
-  }
-
-  // Tag + attribute combinations
-  selectors.push(
-    info.tagName + (info.classes.length ? `.${info.classes[0]}` : "")
-  );
-  if (info.type) {
-    selectors.push(`${info.tagName}[type="${info.type}"]`);
-  }
-  if (info.name) {
-    selectors.push(`${info.tagName}[name="${info.name}"]`);
-  }
-
-  return [...new Set(selectors)]; // Remove duplicates
-}
-
-// ===== TOOL DEFINITIONS =====
-// Analysis tools for the agent to use
-
-const tools: Tool[] = [
-  {
-    name: "AnalyzePage",
-    description:
-      'Analyzes a webpage to find elements matching a description. Usage: AnalyzePage[{"url": "https://example.com", "description": "product prices"}]',
-    run: async (input: string) => {
-      try {
-        const { url, description } = JSON.parse(input);
-
-        if (!url) {
-          throw new Error("URL is required");
-        }
-
-        console.log(`Launching Puppeteer for URL: ${url}`);
-        const browser = await puppeteer.launch({ headless: true });
-        const page = await browser.newPage();
-
+function createDomTools(page: any, url: string): Tool[] {
+  return [
+    {
+      name: "AnalyzePageStructure",
+      description: "Get a high-level overview of the page structure to understand its organization",
+      run: async () => {
         try {
-          // Set user agent and viewport
-          await page.setUserAgent(USER_AGENT);
-          await page.setViewport({ width: 1280, height: 800 });
-
-          // Navigate to the URL
-          await page.goto(url, {
-            timeout: PUPPETEER_TIMEOUT,
-            waitUntil: "networkidle0",
-          });
-
-          // Get all elements
-          const elements = await page.$$("*");
-          const elementInfos: ElementInfo[] = [];
-
-          // Analyze each element (up to MAX_ELEMENTS_TO_ANALYZE)
-          for (const element of elements.slice(0, MAX_ELEMENTS_TO_ANALYZE)) {
-            const info = await getElementInfo(element);
-            elementInfos.push(info);
-          }
-
-          // Group similar elements
-          const groups = new Map<string, ElementInfo[]>();
-          for (const info of elementInfos) {
-            const key = `${info.tagName}-${info.classes.sort().join("-")}`;
-            if (!groups.has(key)) {
-              groups.set(key, []);
-            }
-            groups.get(key)?.push(info);
-          }
-
-          // Generate and test selectors for each group
-          const recommendations: SelectorRecommendation[] = [];
-
-          for (const [_key, group] of groups) {
-            if (group.length === 0) continue;
-
-            // Generate potential selectors
-            const selectors = generateSelectors(group[0]);
-
-            for (const selector of selectors) {
-              // Test selector
-              const matches = await page.$$(selector);
-              if (matches.length === 0) continue;
-
-              // Get info for all matching elements
-              const matchInfos: ElementInfo[] = [];
-              for (const match of matches) {
-                matchInfos.push(await getElementInfo(match));
-              }
-
-              // Calculate confidence score
-              const confidence = calculateConfidence(
-                selector,
-                matchInfos,
-                description
-              );
-              if (confidence < MIN_CONFIDENCE_SCORE) continue;
-
-              // Get sample content
-              const samples = matchInfos
-                .map((m) => m.textContent)
-                .filter(Boolean)
-                .slice(0, 3);
-
-              // Add recommendation
-              recommendations.push({
-                purpose: description,
-                selector,
-                confidence,
-                sample_matches: samples,
-                usage: {
-                  scraping_agent: {
-                    selector,
-                    multiple: matches.length > 1,
-                  },
-                },
-              });
-            }
-          }
-
-          // Sort by confidence
-          recommendations.sort((a, b) => b.confidence - a.confidence);
-
-          // Take top 3 recommendations
-          const result: AnalysisResult = {
-            url,
-            description,
-            recommendations: recommendations.slice(0, 3),
-          };
-
-          await browser.close();
-          return JSON.stringify(result, null, 2);
-        } catch (err) {
-          await browser.close();
-          throw err;
-        }
-      } catch (err) {
-        console.error("Analysis error:", err);
-        return "Error: " + (err as Error).message;
-      }
-    },
-  },
-
-  {
-    name: "TestSelector",
-    description:
-      'Tests a CSS selector on a webpage. Usage: TestSelector[{"url": "https://example.com", "selector": ".product-price"}]',
-    run: async (input: string) => {
-      try {
-        const { url, selector } = JSON.parse(input);
-
-        if (!url || !selector) {
-          throw new Error("URL and selector are required");
-        }
-
-        console.log(`Testing selector "${selector}" on ${url}`);
-        const browser = await puppeteer.launch({ headless: true });
-        const page = await browser.newPage();
-
-        try {
-          await page.setUserAgent(USER_AGENT);
-          await page.setViewport({ width: 1280, height: 800 });
-          await page.goto(url, {
-            timeout: PUPPETEER_TIMEOUT,
-            waitUntil: "networkidle0",
-          });
-
-          // Test the selector
-          const elements = await page.$$(selector);
-          const results = [];
-
-          for (const element of elements) {
-            const info = await getElementInfo(element);
-            results.push({
-              text: info.textContent,
-              html: info.innerHtml,
-              attributes: info.attributes,
+          const structure = await page.evaluate(() => {
+            // Get basic page info
+            const title = document.title;
+            const metaDescription = document.querySelector('meta[name="description"]')?.getAttribute('content') || '';
+            
+            // Count elements by tag
+            const tagCounts: Record<string, number> = {};
+            const allElements = document.querySelectorAll('*');
+            allElements.forEach((el: Element) => {
+              const tag = el.tagName.toLowerCase();
+              tagCounts[tag] = (tagCounts[tag] || 0) + 1;
             });
-          }
-
-          await browser.close();
-          return JSON.stringify(
-            {
-              selector,
-              matches: elements.length,
-              samples: results.slice(0, 3),
-            },
-            null,
-            2
-          );
+            
+            // Find most common class names
+            const classCounts: Record<string, number> = {};
+            allElements.forEach((el: Element) => {
+              if (el.classList) {
+                Array.from(el.classList).forEach((cls: string) => {
+                  classCounts[cls] = (classCounts[cls] || 0) + 1;
+                });
+              }
+            });
+            
+            // Sort class counts and get top 20
+            const topClasses = Object.entries(classCounts)
+              .sort((a, b) => b[1] - a[1])
+              .slice(0, 20)
+              .map(([cls, count]) => ({ class: cls, count }));
+            
+            // Identify potential container elements
+            const containers: any[] = [];
+            const containerTags = ['div', 'section', 'article', 'main', 'ul', 'ol'];
+            
+            for (const tag of containerTags) {
+              const elements = document.querySelectorAll(tag);
+              for (const el of elements) {
+                // Check if it has multiple similar children
+                const children = el.children;
+                if (children.length >= 3) {
+                  // Check if children are similar (same tag)
+                  const childTags = Array.from(children).map((c: Element) => c.tagName);
+                  const uniqueTags = new Set(childTags);
+                  
+                  if (uniqueTags.size <= 3 && children.length >= 3) {
+                    // This might be a container
+                    const classes = Array.from(el.classList).join('.');
+                    const selector = tag + (classes ? '.' + classes : '');
+                    containers.push({
+                      selector,
+                      childCount: children.length,
+                      childTags: Array.from(uniqueTags)
+                    });
+                  }
+                }
+              }
+            }
+            
+            // Sort containers by child count
+            containers.sort((a, b) => b.childCount - a.childCount);
+            
+            return {
+              title,
+              metaDescription,
+              tagCounts,
+              topClasses,
+              potentialContainers: containers.slice(0, 10)
+            };
+          });
+          
+          return JSON.stringify(structure, null, 2);
         } catch (err) {
-          await browser.close();
-          throw err;
+          return `Error analyzing page structure: ${(err as Error).message}`;
         }
-      } catch (err) {
-        console.error("Testing error:", err);
-        return "Error: " + (err as Error).message;
       }
     },
-  },
-
-  {
-    name: "ValidateURL",
-    description:
-      "Validates if a URL is properly formatted and accessible. Usage: ValidateURL[https://example.com]",
-    run: async (input: string) => {
-      try {
-        const url = new URL(input.trim());
-        const response = await fetch(url, { method: "HEAD" });
-        return `URL is valid and returned status ${response.status}`;
-      } catch (err) {
-        return (
-          "Error: Invalid URL or not accessible - " + (err as Error).message
-        );
+    
+    {
+      name: "QueryElements",
+      description: 'Find elements matching a description. Usage: QueryElements[{"description": "product prices", "limit": 5}]',
+      run: async (input: string) => {
+        try {
+          const { description, limit = 5 } = JSON.parse(input);
+          
+          // Use the description to generate potential selectors
+          const selectors = await generateSelectorsFromDescription(description);
+          
+          // Test each selector
+          const results = [];
+          for (const selector of selectors) {
+            try {
+              const elements = await page.$$(selector);
+              if (elements.length > 0) {
+                // Get sample content
+                const samples = await Promise.all(
+                  elements.slice(0, limit).map(async (el: any) => {
+                    return page.evaluate((element: any) => {
+                      return {
+                        text: element.textContent?.trim() || '',
+                        html: element.innerHTML,
+                        outerHTML: element.outerHTML
+                      };
+                    }, el);
+                  })
+                );
+                
+                results.push({
+                  selector,
+                  count: elements.length,
+                  samples
+                });
+              }
+            } catch (err) {
+              console.error(`Error testing selector ${selector}:`, err);
+            }
+          }
+          
+          return JSON.stringify(results, null, 2);
+        } catch (err) {
+          return `Error querying elements: ${(err as Error).message}`;
+        }
       }
     },
-  },
-];
+    
+    {
+      name: "TestSelector",
+      description: 'Test a CSS selector and return matching elements. Usage: TestSelector[{"selector": ".product-price", "limit": 5, "attribute": "src"}]',
+      run: async (input: string) => {
+        try {
+          const { selector, limit = 5, attribute } = JSON.parse(input);
+          
+          const elements = await page.$$(selector);
+          if (elements.length === 0) {
+            return `No elements found matching selector: ${selector}`;
+          }
+          
+          // Get sample content
+          const samples = await Promise.all(
+            elements.slice(0, limit).map(async (el: any) => {
+              return page.evaluate((element: any, attr: string) => {
+                let attributeValue = null;
+                if (attr) {
+                  attributeValue = element.getAttribute(attr);
+                }
+                
+                return {
+                  text: element.textContent?.trim() || '',
+                  html: element.innerHTML,
+                  attribute: attr ? { name: attr, value: attributeValue } : null
+                };
+              }, el, attribute);
+            })
+          );
+          
+          return JSON.stringify({
+            selector,
+            count: elements.length,
+            samples
+          }, null, 2);
+        } catch (err) {
+          return `Error testing selector: ${(err as Error).message}`;
+        }
+      }
+    },
+    
+    {
+      name: "ExtractURL",
+      description: "Extract the URL from the query if it contains one",
+      run: async (input: string) => {
+        try {
+          // Look for URL patterns in the input
+          const urlPattern = /(https?:\/\/[^\s]+)/g;
+          const matches = input.match(urlPattern);
+          
+          if (matches && matches.length > 0) {
+            return matches[0];
+          } else {
+            return `No URL found in: ${input}`;
+          }
+        } catch (err) {
+          return `Error extracting URL: ${(err as Error).message}`;
+        }
+      }
+    },
+    
+    {
+      name: "AnalyzeContent",
+      description: 'Analyze content of elements to determine patterns. Usage: AnalyzeContent[{"selector": ".product-card", "limit": 10}]',
+      run: async (input: string) => {
+        try {
+          const { selector, limit = 10 } = JSON.parse(input);
+          
+          const elements = await page.$$(selector);
+          if (elements.length === 0) {
+            return `No elements found matching selector: ${selector}`;
+          }
+          
+          // Analyze the elements to find common patterns
+          const analysis = await page.evaluate((sel: string, lim: number) => {
+            const elements = document.querySelectorAll(sel);
+            const sampleElements = Array.from(elements).slice(0, lim);
+            
+            // Find common child elements
+            const childSelectors: Record<string, number> = {};
+            
+            sampleElements.forEach((el: Element) => {
+              // Check direct children
+              Array.from(el.children).forEach((child: any) => {
+                const tag = child.tagName.toLowerCase();
+                const classes = Array.from(child.classList).join('.');
+                const selector = tag + (classes ? '.' + classes : '');
+                
+                childSelectors[selector] = (childSelectors[selector] || 0) + 1;
+              });
+              
+              // Check for common patterns like images, links, headings
+              if (el.querySelector('img')) {
+                childSelectors['img'] = (childSelectors['img'] || 0) + 1;
+              }
+              
+              if (el.querySelector('a')) {
+                childSelectors['a'] = (childSelectors['a'] || 0) + 1;
+              }
+              
+              if (el.querySelector('h1, h2, h3, h4, h5, h6')) {
+                childSelectors['heading'] = (childSelectors['heading'] || 0) + 1;
+              }
+              
+              // Check for price patterns
+              const text = el.textContent || '';
+              if (text.match(/\$\d+(\.\d{2})?/) || 
+                  text.match(/€\d+(\.\d{2})?/) || 
+                  text.match(/£\d+(\.\d{2})?/)) {
+                childSelectors['price_pattern'] = (childSelectors['price_pattern'] || 0) + 1;
+              }
+            });
+            
+            // Sort by frequency
+            const commonChildren = Object.entries(childSelectors)
+              .sort((a, b) => b[1] - a[1])
+              .map(([selector, count]) => ({ 
+                selector, 
+                count, 
+                percentage: Math.round((count / sampleElements.length) * 100) 
+              }));
+            
+            return {
+              totalElements: elements.length,
+              analyzed: sampleElements.length,
+              commonChildren
+            };
+          }, selector, limit);
+          
+          return JSON.stringify(analysis, null, 2);
+        } catch (err) {
+          return `Error analyzing content: ${(err as Error).message}`;
+        }
+      }
+    },
+    
+    {
+      name: "GenerateConfig",
+      description: 'Generate a scraping configuration based on findings. Usage: GenerateConfig[{"containerSelector": ".product-card", "fields": {"title": ".title", "price": ".price", "image": {"selector": "img", "attribute": "src"}}}]',
+      run: async (input: string) => {
+        try {
+          const config = JSON.parse(input);
+          
+          // Extract domain from URL for config filename
+          const domain = new URL(url).hostname.replace(/^www\./, '');
+          const configFilename = `${domain}-config.json`;
+          
+          // Write the config to a file
+          await Deno.writeTextFile(configFilename, JSON.stringify(config, null, 2));
+          
+          return `Configuration saved to ${configFilename}`;
+        } catch (err) {
+          return `Error generating config: ${(err as Error).message}`;
+        }
+      }
+    }
+  ];
+}
 
-// ===== SYSTEM PROMPT =====
-// Selector analysis focused system prompt
-
-// Generate tool descriptions for the system prompt
-const toolDescriptions = tools
-  .map((t) => `${t.name}: ${t.description}`)
-  .join("\n");
-
-// The system prompt that instructs the model how to behave
-const systemPrompt = `You are a CSS selector finder assistant, tasked with analyzing web pages to find optimal selectors for extracting specific content.
-
-You have access to the following tools:
-${toolDescriptions}
-
-When analyzing web pages:
-1. Always validate URLs before analysis
-2. Use AnalyzePage to find potential selectors
-3. Test promising selectors to verify accuracy
-4. Provide clear recommendations with examples
-
-Follow this format strictly:
-Thought: <your reasoning here>
-Action: <ToolName>[<tool input>]
-Observation: <result of the tool action>
-... (you can repeat Thought/Action/Observation as needed) ...
-Thought: <final reasoning>
-Answer: <your final answer with recommended selectors>
-
-Your final answer MUST begin with "Answer: " and should include:
-1. The recommended selectors
-2. Sample content they match
-3. Confidence scores
-4. Ready-to-use configurations for the scraping agent
-
-Only provide one action at a time, and wait for the observation before continuing.
-You MUST use at least one tool before providing your final answer.`;
+/**
+ * Generate potential selectors based on a natural language description
+ */
+async function generateSelectorsFromDescription(description: string): Promise<string[]> {
+  // This is a simplified version - in a real implementation, we would use the LLM
+  // to generate selectors based on the description
+  
+  const descriptionLower = description.toLowerCase();
+  
+  // Common selector patterns based on description keywords
+  const selectorPatterns: Record<string, string[]> = {
+    'price': ['.price', '[class*="price"]', '.amount', '.money', '[data-price]'],
+    'title': ['h1', 'h2', 'h3', '.title', '[class*="title"]', '.name', '[class*="name"]'],
+    'image': ['img', '[class*="image"] img', 'picture img', '[data-src]'],
+    'product': ['.product', '.product-card', '.item', '.card', '[class*="product"]'],
+    'article': ['article', '.post', '.article', '.blog-post'],
+    'navigation': ['nav', '.nav', '.menu', '.navigation', 'header a'],
+    'button': ['button', '.btn', '[class*="button"]', 'a.button'],
+    'link': ['a', '.link', '[href]'],
+    'container': ['.container', '.wrapper', '.content', 'main', 'section'],
+    'list': ['ul', 'ol', '.list', '[class*="list"]', '.grid'],
+    'form': ['form', '.form', '[class*="form"]'],
+    'input': ['input', 'textarea', 'select', '[class*="input"]'],
+    'header': ['header', '.header', '[class*="header"]'],
+    'footer': ['footer', '.footer', '[class*="footer"]'],
+    'sidebar': ['.sidebar', '[class*="sidebar"]', 'aside'],
+    'card': ['.card', '[class*="card"]', '.item', '.box'],
+    'text': ['p', '.text', '[class*="text"]', '.description'],
+    'date': ['.date', '[class*="date"]', 'time', '[datetime]'],
+    'author': ['.author', '[class*="author"]', '.byline'],
+    'comment': ['.comment', '[class*="comment"]'],
+    'rating': ['.rating', '[class*="rating"]', '.stars'],
+    'social': ['.social', '[class*="social"]', '.share'],
+    'search': ['.search', '[class*="search"]', 'input[type="search"]'],
+    'video': ['video', '.video', '[class*="video"]', 'iframe[src*="youtube"]'],
+    'audio': ['audio', '.audio', '[class*="audio"]'],
+    'gallery': ['.gallery', '[class*="gallery"]', '.carousel', '.slider']
+  };
+  
+  // Find matching patterns based on description
+  const selectors: string[] = [];
+  
+  for (const [key, patterns] of Object.entries(selectorPatterns)) {
+    if (descriptionLower.includes(key)) {
+      selectors.push(...patterns);
+    }
+  }
+  
+  // Add some generic selectors if we don't have many matches
+  if (selectors.length < 5) {
+    selectors.push('div', 'span', 'a', 'p', 'h1', 'h2', 'h3', 'img');
+  }
+  
+  // Remove duplicates
+  return [...new Set(selectors)];
+}
 
 // ===== LLM INTEGRATION =====
 // Functions for interacting with the language model
 
-// Store the last observation for fallback purposes
-let lastObservation = "";
 
 /**
- * Calls the OpenRouter API with the given messages.
- * @param messages - Array of chat messages to send to the LLM
- * @returns The model's response text
+ * Parse the query to extract the URL and content description
  */
-async function callOpenRouter(messages: ChatMessage[]): Promise<string> {
-  try {
-    console.log("Calling OpenRouter API...");
-    const response = await fetch(
-      "https://openrouter.ai/api/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: OPENROUTER_MODEL,
-          messages: messages,
-          stop: ["Observation:"], // Stop generation before the model writes an observation
-          temperature: DEFAULT_TEMPERATURE,
-          max_tokens: MAX_TOKENS,
-        }),
-      }
-    );
+function parseQuery(query: string): { url: string; contentDescription: string } {
+  // Extract URL from query
+  const urlPattern = /(https?:\/\/[^\s]+)/g;
+  const urlMatches = query.match(urlPattern);
+  
+  if (!urlMatches || urlMatches.length === 0) {
+    throw new Error("No URL found in the query. Please include a URL to analyze.");
+  }
+  
+  const url = urlMatches[0];
+  
+  // Remove the URL from the query to get the content description
+  let contentDescription = query.replace(url, "").trim();
+  
+  // Clean up the content description
+  contentDescription = contentDescription
+    .replace(/^find\s+/i, "")
+    .replace(/^get\s+/i, "")
+    .replace(/^extract\s+/i, "")
+    .replace(/\s+on\s+$/i, "")
+    .replace(/\s+from\s+$/i, "")
+    .replace(/\s+in\s+$/i, "");
+  
+  // If no content description is provided, use a default
+  if (!contentDescription) {
+    contentDescription = "product information";
+  }
+  
+  return { url, contentDescription };
+}
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(
-        `OpenRouter API error: HTTP ${response.status} - ${errorText}`
-      );
-    }
+/**
+ * Determine the content type from the content description
+ */
+function determineContentType(contentDescription: string): string {
+  const contentDescription_lower = contentDescription.toLowerCase();
+  
+  // Check for product-related terms
+  if (
+    contentDescription_lower.includes("product") ||
+    contentDescription_lower.includes("price") ||
+    contentDescription_lower.includes("item") ||
+    contentDescription_lower.includes("shop") ||
+    contentDescription_lower.includes("store") ||
+    contentDescription_lower.includes("buy")
+  ) {
+    return "product";
+  }
+  
+  // Check for article-related terms
+  if (
+    contentDescription_lower.includes("article") ||
+    contentDescription_lower.includes("blog") ||
+    contentDescription_lower.includes("post") ||
+    contentDescription_lower.includes("news") ||
+    contentDescription_lower.includes("author") ||
+    contentDescription_lower.includes("date") ||
+    contentDescription_lower.includes("publish")
+  ) {
+    return "article";
+  }
+  
+  // Check for navigation-related terms
+  if (
+    contentDescription_lower.includes("nav") ||
+    contentDescription_lower.includes("menu") ||
+    contentDescription_lower.includes("header") ||
+    contentDescription_lower.includes("link") ||
+    contentDescription_lower.includes("site map")
+  ) {
+    return "navigation";
+  }
+  
+  // Check for form-related terms
+  if (
+    contentDescription_lower.includes("form") ||
+    contentDescription_lower.includes("input") ||
+    contentDescription_lower.includes("field") ||
+    contentDescription_lower.includes("button") ||
+    contentDescription_lower.includes("submit") ||
+    contentDescription_lower.includes("contact")
+  ) {
+    return "form";
+  }
+  
+  // Default to product if no specific type is detected
+  return "product";
+}
 
-    const data = await response.json();
-    console.log(`OpenRouter API response received`);
-
-    const content: string | undefined = data.choices?.[0]?.message?.content;
-    if (
-      !content ||
-      typeof content !== "string" ||
-      content.trim().length === 0
-    ) {
-      console.error("Empty or invalid response from OpenRouter API");
-      throw new Error("Empty or invalid response from LLM");
-    }
-
-    return content;
-  } catch (err) {
-    console.error("Error calling OpenRouter:", err);
-    throw err;
+/**
+ * Get container selectors based on content type
+ */
+function getContainerSelectors(contentType: string): string[] {
+  switch (contentType) {
+    case "product":
+      return [
+        '.product-card', 
+        '.product-wrap', 
+        '.product', 
+        '.product-item',
+        '.grid__item',
+        '[data-product-card]',
+        '.product-grid-item',
+        '.product-list-item',
+        '.item',
+        '.card'
+      ];
+    case "article":
+      return [
+        'article',
+        '.post',
+        '.blog-post',
+        '.article',
+        '.news-item',
+        '.entry',
+        '.blog-entry',
+        '.content-item',
+        '.post-item',
+        '.story'
+      ];
+    case "navigation":
+      return [
+        'nav',
+        '.nav',
+        '.navigation',
+        '.menu',
+        '.main-menu',
+        '.navbar',
+        'header ul',
+        '.site-nav',
+        '.header-menu',
+        '.nav-menu'
+      ];
+    case "form":
+      return [
+        'form',
+        '.form',
+        '.contact-form',
+        '.form-container',
+        '.input-group',
+        '.form-group',
+        '.form-wrapper',
+        '.contact-container',
+        '.form-section',
+        '.form-area'
+      ];
+    default:
+      return [
+        '.product-card', 
+        '.product-wrap', 
+        '.product', 
+        '.item',
+        '.card',
+        'article',
+        '.post',
+        'li',
+        '.grid-item',
+        '.col'
+      ];
   }
 }
 
 /**
- * Runs the ReACT agent loop for a given user query.
- * @param query - The user's question or command for the agent.
- * @returns The final answer from the agent.
+ * Get field selectors based on content type and field name
  */
-async function runAgent(query: string): Promise<string> {
-  const messages: ChatMessage[] = [
-    { role: "system", content: systemPrompt },
-    { role: "user", content: query },
+function getFieldSelectors(contentType: string, fieldName: string): string[] {
+  const fieldName_lower = fieldName.toLowerCase();
+  
+  // Common selectors for different field types
+  const titleSelectors = [
+    'h1', 'h2', 'h3', '.title', '[class*="title"]', '.name', '[class*="name"]', 'a'
   ];
+  
+  const priceSelectors = [
+    '.price', '[class*="price"]', '.amount', '.money', '[data-price]'
+  ];
+  
+  const imageSelectors = [
+    'img', '[class*="image"] img', 'picture img', '[data-src]'
+  ];
+  
+  const authorSelectors = [
+    '.author', '[class*="author"]', '.byline', '.meta-author', '.writer'
+  ];
+  
+  const dateSelectors = [
+    '.date', '[class*="date"]', 'time', '[datetime]', '.published', '.meta-date'
+  ];
+  
+  const linkSelectors = [
+    'a', '.link', '[href]', '.read-more', '.more-link'
+  ];
+  
+  const buttonSelectors = [
+    'button', '.btn', '[class*="button"]', 'input[type="submit"]', '.submit'
+  ];
+  
+  const inputSelectors = [
+    'input', 'textarea', 'select', '.input', '.field', '[class*="input"]'
+  ];
+  
+  // Determine which selectors to return based on field name and content type
+  if (
+    fieldName_lower.includes("title") || 
+    fieldName_lower.includes("name") || 
+    fieldName_lower.includes("heading")
+  ) {
+    return titleSelectors;
+  }
+  
+  if (
+    fieldName_lower.includes("price") || 
+    fieldName_lower.includes("cost") || 
+    fieldName_lower.includes("amount")
+  ) {
+    return priceSelectors;
+  }
+  
+  if (
+    fieldName_lower.includes("image") || 
+    fieldName_lower.includes("img") || 
+    fieldName_lower.includes("photo") || 
+    fieldName_lower.includes("picture")
+  ) {
+    return imageSelectors;
+  }
+  
+  if (
+    fieldName_lower.includes("author") || 
+    fieldName_lower.includes("writer") || 
+    fieldName_lower.includes("by")
+  ) {
+    return authorSelectors;
+  }
+  
+  if (
+    fieldName_lower.includes("date") || 
+    fieldName_lower.includes("time") || 
+    fieldName_lower.includes("published")
+  ) {
+    return dateSelectors;
+  }
+  
+  if (
+    fieldName_lower.includes("link") || 
+    fieldName_lower.includes("url") || 
+    fieldName_lower.includes("href")
+  ) {
+    return linkSelectors;
+  }
+  
+  if (
+    fieldName_lower.includes("button") || 
+    fieldName_lower.includes("submit") || 
+    fieldName_lower.includes("action")
+  ) {
+    return buttonSelectors;
+  }
+  
+  if (
+    fieldName_lower.includes("input") || 
+    fieldName_lower.includes("field") || 
+    fieldName_lower.includes("form") ||
+    fieldName_lower.includes("text")
+  ) {
+    return inputSelectors;
+  }
+  
+  // Default to title selectors if no specific field type is detected
+  switch (contentType) {
+    case "product":
+      return titleSelectors;
+    case "article":
+      return titleSelectors;
+    case "navigation":
+      return linkSelectors;
+    case "form":
+      return inputSelectors;
+    default:
+      return titleSelectors;
+  }
+}
 
-  console.log(`Starting agent with query: "${query}"`);
-  lastObservation = ""; // Reset the last observation
-
-  // The agent will iterate, allowing up to MAX_STEPS reasoning loops
-  for (let step = 0; step < MAX_STEPS; step++) {
-    console.log(`Step ${step + 1}/${MAX_STEPS}`);
-
-    try {
-      // Call the LLM via OpenRouter
-      const assistantReply = await callOpenRouter(messages);
-
-      if (!assistantReply || assistantReply.trim().length === 0) {
-        console.log("Received empty reply from assistant, using fallback");
-        if (lastObservation && lastObservation.length > 0) {
-          // If we have a previous observation, use it as the answer
-          console.log("Using last observation as fallback answer");
-          return `Based on my analysis, here's what I found:\n\n${lastObservation}`;
-        } else {
-          throw new Error(
-            "Empty response from assistant and no fallback available"
-          );
-        }
-      }
-
-      console.log(
-        `Assistant reply (${
-          assistantReply.length
-        } chars):\n${assistantReply.substring(0, 200)}...`
-      );
-
-      // Append the assistant's reply to the message history
-      messages.push({ role: "assistant", content: assistantReply });
-
-      // Check if the assistant's reply contains a final answer
-      const answerMatch = assistantReply.match(/Answer:\s*([\s\S]*?)$/); // Use [\s\S] to match any character including newlines
-      if (answerMatch) {
-        const answer = answerMatch[1].trim();
-        if (answer.length > 0) {
-          console.log(`Found answer (${answer.length} chars)`);
-          // Return the text after "Answer:" as the final answer
-          return answer;
-        } else {
-          console.log("Found empty answer, using fallback");
-          if (lastObservation && lastObservation.length > 0) {
-            // If we have a previous observation, use it as the answer
-            console.log("Using last observation as fallback answer");
-            return `Based on my analysis, here's what I found:\n\n${lastObservation}`;
-          }
-        }
-      }
-
-      // Otherwise, look for an action to perform
-      const actionMatch = assistantReply.match(
-        /Action:\s*([^\[]+)\[([^\]]+)\]/
-      );
-      if (actionMatch) {
-        const toolName = actionMatch[1].trim();
-        const toolInput = actionMatch[2].trim();
-        console.log(`Tool use: ${toolName}[${toolInput}]`);
-
-        // Find the tool by name (case-insensitive match)
-        const tool = tools.find(
-          (t) => t.name.toLowerCase() === toolName.toLowerCase()
-        );
-        let observation: string;
-        if (!tool) {
-          observation = `Tool "${toolName}" not found`;
-        } else {
-          try {
-            const result = await tool.run(toolInput);
-            observation = String(result);
-            // Store this observation as a potential fallback answer
-            lastObservation = observation;
-          } catch (err) {
-            observation = `Error: ${(err as Error).message}`;
-          }
-        }
-        console.log(
-          `Observation (${observation.length} chars):\n${observation.substring(
-            0,
-            200
-          )}...`
-        );
-
-        // Append the observation as a system message for the next LLM call
-        messages.push({
-          role: "system",
-          content: `Observation: ${observation}`,
-        });
-        // Continue loop for next reasoning step with the new observation in context
-        continue;
-      }
-
-      console.log("No Action or Answer found in reply, checking for fallback");
-      // If no Action or Answer was found in the assistant's reply, check if we have a fallback
-      if (lastObservation && lastObservation.length > 0) {
-        console.log("Using last observation as fallback answer");
-        return `Based on my analysis, here's what I found:\n\n${lastObservation}`;
-      }
-
-      // If we have no fallback, return the assistant's reply as is
-      console.log("No fallback available, returning assistant reply as answer");
-      return assistantReply.trim();
-    } catch (err) {
-      console.error(`Error in step ${step + 1}:`, err);
-
-      // If we have a fallback observation, use it instead of failing
-      if (lastObservation && lastObservation.length > 0) {
-        console.log(
-          "Error occurred, using last observation as fallback answer"
-        );
-        return `Based on my analysis, here's what I found:\n\n${lastObservation}`;
-      }
-
-      throw err;
+/**
+ * Extract field names from content description
+ */
+function extractFieldNames(contentDescription: string): string[] {
+  // Common field names to look for
+  const commonFields = [
+    "title", "name", "price", "cost", "image", "photo", "picture", 
+    "description", "detail", "author", "date", "time", "link", "url", 
+    "button", "input", "field", "text"
+  ];
+  
+  // Check if any common fields are mentioned in the content description
+  const mentionedFields = commonFields.filter(field => 
+    contentDescription.toLowerCase().includes(field)
+  );
+  
+  // If no specific fields are mentioned, return default fields based on content type
+  if (mentionedFields.length === 0) {
+    const contentType = determineContentType(contentDescription);
+    
+    switch (contentType) {
+      case "product":
+        return ["title", "price", "image"];
+      case "article":
+        return ["title", "author", "date"];
+      case "navigation":
+        return ["link", "text"];
+      case "form":
+        return ["input", "button"];
+      default:
+        return ["title", "link"];
     }
   }
+  
+  return mentionedFields;
+}
 
-  console.error("Agent did not produce a final answer within the step limit");
+/**
+ * Main function to find selectors on a webpage
+ */
+async function findSelectors(query: string): Promise<string> {
+  // Parse the query to extract the URL and content description
+  const { url, contentDescription } = parseQuery(query);
+  
+  console.log(`Query: "${query}"`);
+  console.log(`URL: ${url}`);
+  console.log(`Content Description: ${contentDescription}`);
+  
+  // Determine the content type
+  const contentType = determineContentType(contentDescription);
+  console.log(`Detected Content Type: ${contentType}`);
+  
+  // Extract field names from content description
+  const fieldNames = extractFieldNames(contentDescription);
+  console.log(`Fields to Find: ${fieldNames.join(", ")}`);
+  
+  console.log(`Launching Puppeteer for URL: ${url}`);
+  const browser = await puppeteer.launch({ 
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
+  });
+  const page = await browser.newPage();
 
-  // If we have a fallback observation, use it instead of failing
-  if (lastObservation && lastObservation.length > 0) {
-    console.log(
-      "Step limit reached, using last observation as fallback answer"
+  try {
+    // Set user agent and viewport
+    await page.setUserAgent(USER_AGENT);
+    await page.setViewport({ width: 1280, height: 800 });
+
+    // Navigate to the URL with timeout
+    console.log("Navigating to URL...");
+    await page.goto(url, {
+      timeout: PUPPETEER_TIMEOUT,
+      waitUntil: "networkidle0",
+    });
+
+    // Wait for body to ensure page is loaded
+    await page.waitForSelector('body', { timeout: PUPPETEER_TIMEOUT });
+    
+    // Wait a bit for any dynamic content
+    console.log("Waiting for dynamic content to load...");
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    // Find containers based on content type
+    console.log(`Finding ${contentType} containers...`);
+    const containerSelectors = getContainerSelectors(contentType);
+    
+    const containerResults = await Promise.all(
+      containerSelectors.map(async (selector) => {
+        const count = await page.$$eval(selector, elements => elements.length);
+        return { selector, count };
+      })
     );
-    return `Based on my analysis, here's what I found:\n\n${lastObservation}`;
+    
+    console.log("Product container candidates:");
+    containerResults.forEach(result => {
+      console.log(`  ${result.selector}: ${result.count} elements`);
+    });
+    
+    // Find best container selector (one with most elements)
+    const bestContainer = containerResults.reduce((best, current) => 
+      current.count > best.count ? current : best, 
+      { selector: '', count: 0 }
+    );
+    
+    if (bestContainer.count === 0) {
+      console.log("No product containers found! Trying generic selectors...");
+      // Try to find any repeating elements
+      const genericSelectors = [
+        'li', 
+        'div > div',
+        'article',
+        'section > div',
+        '.item',
+        '.col'
+      ];
+      
+      const genericResults = await Promise.all(
+        genericSelectors.map(async (selector) => {
+          const count = await page.$$eval(selector, elements => elements.length);
+          return { selector, count };
+        })
+      );
+      
+      // Filter to only selectors with multiple elements (more than 3)
+      const filteredGenericResults = genericResults.filter(r => r.count > 3);
+      
+      if (filteredGenericResults.length > 0) {
+        // Sort by count (ascending, as we want the most specific selector with multiple matches)
+        filteredGenericResults.sort((a, b) => a.count - b.count);
+        bestContainer.selector = filteredGenericResults[0].selector;
+        bestContainer.count = filteredGenericResults[0].count;
+      } else {
+        await browser.close();
+        return JSON.stringify({
+          error: "Could not find any suitable container elements on the page",
+          url: url
+        }, null, 2);
+      }
+    }
+    
+    console.log(`\nBest container selector: ${bestContainer.selector} (${bestContainer.count} elements)`);
+    
+    // Find selectors for each field
+    const fieldResults: Record<string, SelectorResult[]> = {};
+    const bestFields: Record<string, { selector: string; attribute?: string }> = {};
+    
+    for (const fieldName of fieldNames) {
+      console.log(`\nFinding ${fieldName} selectors...`);
+      
+      // Get appropriate selectors for this field
+      const fieldSelectors = getFieldSelectors(contentType, fieldName);
+      
+      // Determine if we need to look for an attribute
+      const needsAttribute = 
+        fieldName.toLowerCase().includes("image") || 
+        fieldName.toLowerCase().includes("link") ||
+        fieldName.toLowerCase().includes("url");
+      
+      const attribute = needsAttribute ? (fieldName.toLowerCase().includes("image") ? "src" : "href") : undefined;
+      
+      // Test the selectors
+      const results = await testSelectorsInContainer(page, bestContainer.selector, fieldSelectors, attribute);
+      fieldResults[fieldName] = results;
+      
+      console.log(`${fieldName} selector candidates:`);
+      results.forEach(result => {
+        console.log(`  ${result.selector}: ${result.count} elements, Sample: "${result.sample}"`);
+      });
+      
+      // Store the best selector for this field
+      if (results.length > 0) {
+        bestFields[fieldName] = {
+          selector: results[0].selector,
+          ...(attribute && { attribute })
+        };
+      }
+    }
+    
+    // Generate config file
+    const config: SelectorConfig = {
+      selector: bestContainer.selector,
+      waitFor: "body",
+      fields: bestFields
+    };
+    
+    console.log("\nGenerated scraping configuration:");
+    console.log(JSON.stringify(config, null, 2));
+    
+    // Format the result
+    const recommendations: SelectorRecommendation[] = [
+      {
+        purpose: `${contentType} container`,
+        selector: bestContainer.selector,
+        confidence: 0.9,
+        sample_matches: await getSampleContent(page, bestContainer.selector, 3),
+        usage: {
+          scraping_agent: {
+            selector: bestContainer.selector,
+            multiple: true,
+            waitFor: "body"
+          }
+        }
+      }
+    ];
+    
+    // Add recommendations for each field
+    for (const fieldName of fieldNames) {
+      const results = fieldResults[fieldName];
+      if (results && results.length > 0) {
+        const bestSelector = results[0].selector;
+        const fullSelector = `${bestContainer.selector} ${bestSelector}`;
+        
+        recommendations.push({
+          purpose: fieldName,
+          selector: fullSelector,
+          confidence: 0.8,
+          sample_matches: await getSampleContent(page, fullSelector, 3),
+          usage: {
+            scraping_agent: {
+              selector: fullSelector,  // Use the full selector instead of just the relative one
+              multiple: false,
+              ...(bestFields[fieldName].attribute && { 
+                extractAttribute: bestFields[fieldName].attribute 
+              })
+            }
+          }
+        });
+      }
+    }
+    
+    const result: AnalysisResult = {
+      url,
+      query,
+      recommendations
+    };
+    
+    // Extract domain from URL for config filename
+    const domain = new URL(url).hostname.replace(/^www\./, '');
+    const configFilename = `${domain}-config.json`;
+    
+    // Ensure proper JSON formatting with commas between properties
+    await Deno.writeTextFile(configFilename, JSON.stringify(config, null, 2));
+    console.log(`\nConfiguration saved to ${configFilename}`);
+    
+    await browser.close();
+    return JSON.stringify(result, null, 2);
+  } catch (err) {
+    console.error("Error finding selectors:", err);
+    await browser.close();
+    return JSON.stringify({
+      error: `Error analyzing page: ${(err as Error).message}`,
+      url
+    }, null, 2);
   }
+}
 
-  throw new Error(
-    "Agent did not produce a final answer within the step limit."
-  );
+/**
+ * Tests selectors within a container element
+ */
+async function testSelectorsInContainer(
+  page: puppeteer.Page, 
+  containerSelector: string, 
+  selectors: string[],
+  attribute?: string
+): Promise<SelectorResult[]> {
+  const results = [];
+  
+  for (const selector of selectors) {
+    const fullSelector = `${containerSelector} ${selector}`;
+    
+    try {
+      const { count, sample } = await page.evaluate((sel, attr) => {
+        const elements = document.querySelectorAll(sel);
+        if (elements.length === 0) return { count: 0, sample: '' };
+        
+        let sampleText = '';
+        if (attr) {
+          sampleText = elements[0].getAttribute(attr) || '';
+        } else {
+          sampleText = elements[0].textContent?.trim() || '';
+        }
+        
+        return { 
+          count: elements.length,
+          sample: sampleText.substring(0, 50) + (sampleText.length > 50 ? '...' : '')
+        };
+      }, fullSelector, attribute);
+      
+      if (count > 0) {
+        results.push({ selector, count, sample });
+      }
+    } catch (err) {
+      console.error(`Error testing selector ${fullSelector}:`, err);
+    }
+  }
+  
+  // Sort by count (descending)
+  return results.sort((a, b) => b.count - a.count);
+}
+
+/**
+ * Gets sample content from elements matching a selector
+ */
+async function getSampleContent(
+  page: puppeteer.Page,
+  selector: string,
+  limit: number
+): Promise<string[]> {
+  try {
+    return await page.evaluate((sel, lim) => {
+      const elements = document.querySelectorAll(sel);
+      return Array.from(elements)
+        .slice(0, lim)
+        .map(el => el.textContent?.trim() || '')
+        .filter(text => text.length > 0);
+    }, selector, limit);
+  } catch (err) {
+    console.error(`Error getting sample content for ${selector}:`, err);
+    return [];
+  }
 }
 
 // ===== OUTPUT HANDLING =====
@@ -777,15 +1118,8 @@ async function runCliMode(query: string): Promise<void> {
   console.log(`Running in CLI mode with query: "${query}"`);
 
   try {
-    // Check if API key is set
-    if (!OPENROUTER_API_KEY) {
-      console.error("Error: OPENROUTER_API_KEY is not set in environment.");
-      console.error("Please set it with: export OPENROUTER_API_KEY=your_key");
-      Deno.exit(1);
-    }
-
     console.log("Starting selector finder agent...");
-    const answer = await runAgent(query);
+    const answer = await findSelectors(query);
     console.log(`Got answer (${answer.length} chars)`);
 
     const filename = generateFilename();
@@ -841,7 +1175,7 @@ function startWebServer(): void {
           JSON.stringify({
             message: "Welcome to the Selector Finder API",
             usage:
-              'Send a POST request with JSON body: { "query": "Find selectors for product prices on example.com" }' +
+              'Send a POST request with JSON body: { "query": "Find selectors for product prices on example.com/products" }' +
               (SERVER_API_KEY
                 ? " Include your API key in the Authorization header: 'Authorization: Bearer your-api-key'"
                 : ""),
@@ -881,7 +1215,7 @@ function startWebServer(): void {
       }
 
       try {
-        const answer = await runAgent(query);
+        const answer = await findSelectors(query);
         const responseData = { query, answer };
         return new Response(JSON.stringify(responseData), {
           headers: { "Content-Type": "application/json" },

@@ -1,17 +1,18 @@
 {
+  "nodeModulesDir": "auto",
   "tasks": {
-    "scrape": "deno run --allow-read --allow-write --allow-net --allow-env --allow-run agents/scraping-agent.ts",
-    "scrape:install": "deno install --allow-read --allow-write --allow-net --allow-env --allow-run --global --name scrape agents/scraping-agent.ts",
-    "find-selector": "deno run --allow-read --allow-write --allow-net --allow-env --allow-run agents/selector-finder.ts",
-    "find-selector:install": "deno install --allow-read --allow-write --allow-net --allow-env --allow-run --global --name find-selector agents/selector-finder.ts"
+    "research": "deno run --allow-read --allow-write --allow-net --allow-env --allow-run agents/research-agent.ts",
+    "research:install": "deno install --allow-read --allow-write --allow-net --allow-env --allow-run --global --name research agents/research-agent.ts",
+    "scrape": "deno run --allow-read --allow-write --allow-net --allow-env --allow-run --allow-sys --allow-scripts=npm:puppeteer@24.4.0 agents/scraping-agent.ts",
+    "scrape:install": "deno install --allow-read --allow-write --allow-net --allow-env --allow-run --allow-sys --allow-scripts=npm:puppeteer@24.4.0 --global --name scrape -f agents/scraping-agent.ts",
+    "find-selector": "deno run --allow-read --allow-write --allow-net --allow-env --allow-run --allow-sys --allow-scripts=npm:puppeteer@24.4.0 agents/selector-finder.ts",
+    "find-selector:install": "deno install --allow-read --allow-write --allow-net --allow-env --allow-run --allow-sys --allow-scripts=npm:puppeteer@24.4.0 --global --name find-selector -f agents/selector-finder.ts"
   },
   "imports": {
     "std/": "https://deno.land/std@0.192.0/",
-    "puppeteer": "https://deno.land/x/puppeteer@16.2.0/mod.ts",
-    "puppeteer/": "https://deno.land/x/puppeteer@16.2.0/"
+    "puppeteer": "npm:puppeteer@24.4.0"
   },
   "compilerOptions": {
-    "allowJs": true,
     "lib": ["dom", "dom.iterable", "esnext"],
     "strict": true,
     "types": ["./types.d.ts"]

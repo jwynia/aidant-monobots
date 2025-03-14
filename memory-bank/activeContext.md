@@ -11,7 +11,22 @@
    - Markdown output with citations
    - Dual-mode operation (CLI/Web)
 
-2. **Agent Template** (`templates/agent-template.ts`)
+2. **Scraping Agent** (`agents/scraping-agent.ts`)
+
+   - Web scraping capabilities using Puppeteer
+   - Configuration-based content extraction
+   - JSON output with structured data
+   - Direct Puppeteer implementation (no external API dependency)
+
+3. **Selector Finder Agent** (`agents/selector-finder.ts`)
+
+   - Automatic CSS selector discovery for web pages
+   - Content-type aware selector generation
+   - Natural language query parsing
+   - Direct Puppeteer implementation (no external API dependency)
+   - Configuration file generation for scraping agent
+
+4. **Agent Template** (`templates/agent-template.ts`)
    - Base implementation for new agents
    - Core ReACT pattern structure
    - Extensible tool system
@@ -40,6 +55,31 @@
    - Core documentation files
    - Implementation guidelines
    - Deployment instructions
+
+### Agent Enhancements
+
+1. **Selector Finder Agent**
+
+   - Removed OpenRouter API dependency
+   - Implemented direct Puppeteer-based selector discovery
+   - Added natural language query parsing
+   - Enhanced to support different content types (products, navigation, articles, forms)
+   - Improved selector generation based on content type
+   - Added configuration file generation for scraping agent
+
+2. **Scraping Agent**
+   - Removed OpenRouter API dependency
+   - Implemented direct Puppeteer-based scraping
+   - Enhanced error handling and fallback mechanisms
+   - Improved configuration handling
+
+### Architectural Refinements
+
+1. **Removal of Hard-Coded Solutions**
+   - Removed find-selectors.ts which contained site-specific, hard-coded scraping logic
+   - Reinforced project philosophy of using LLMs for judgment calls and flexible solutions
+   - Emphasized the importance of creating generic, adaptable agents rather than one-off scripts
+   - Ensured all implementations follow the principle of flexibility across different contexts
 
 ## Next Steps
 
