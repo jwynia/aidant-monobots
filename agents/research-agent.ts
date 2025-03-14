@@ -1,10 +1,10 @@
 /**
  * Single File ReAct Research Agent (Deno)
- * 
+ *
  * This agent follows the ReACT (Reasoning + Acting) logic pattern, integrates with the OpenRouter API for LLM interactions,
  * and uses the Perplexity Sonar API for deep research capabilities. It is designed as a single-file TypeScript script for Deno,
  * optimized for minimal latency in serverless environments like Fly.io and Supabase Edge Functions.
- * 
+ *
  * ## Features
  * - Dual-mode operation (CLI and web server)
  * - ReACT pattern implementation (Thought → Action → Observation loop)
@@ -12,7 +12,7 @@
  * - API key authentication for web server
  * - Error handling with fallback mechanisms
  * - Markdown output with citations
- * 
+ *
  * ## Setup
  * - Ensure you have a Deno runtime available
  * - Set the environment variable `OPENROUTER_API_KEY` with your OpenRouter API key
@@ -20,18 +20,18 @@
  * - (Optional) Set `OPENROUTER_MODEL` to specify the model (default is "openai/o3-mini-high")
  * - (Optional) Set `SERVER_API_KEY` to secure the web server API
  * - Run with: `deno run --allow-read --allow-write --allow-net --allow-env --allow-run research-agent-revised.ts`
- * - Install as command: `deno install --allow-read --allow-write --allow-net --allow-env --allow-run --global --name research research-agent-revised.ts`
- * 
+ * - Install as command: `deno install --allow-read --allow-write --allow-net --allow-env --allow-run --global --name research research-agent.ts`
+ *
  * ## Usage
  * - CLI mode: `research "What caused the fall of the Roman Republic?"`
  * - Web server: Send POST request to http://localhost:8000 with JSON body: `{ "query": "What caused the fall of the Roman Republic?" }`
- * 
+ *
  * ## Deployment (Fly.io)
  * 1. Create a Dockerfile using a Deno base image (e.g. `denoland/deno:alpine`).
  *    - In the Dockerfile, copy this script into the image and use `CMD ["run", \"--allow-net\", \"--allow-env\", \"agent.ts\"]`.
  * 2. Set the `OPENROUTER_API_KEY` and `PERPLEXITY_API_KEY` as secrets on Fly.io (e.g., `fly secrets set OPENROUTER_API_KEY=your_key`).
  * 3. Deploy with `fly deploy`. The app will start an HTTP server on port 8000 by default (adjust Fly.io config for port if needed).
- * 
+ *
  * ## Deployment (Supabase Edge Functions)
  * 1. Install the Supabase CLI and login to your project.
  * 2. Create a new Edge Function: `supabase functions new myagent`.
@@ -48,7 +48,8 @@ import { serve } from "https://deno.land/std@0.192.0/http/server.ts";
 
 // API Keys and Endpoints
 const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY") || ""; // Your OpenRouter API key
-const OPENROUTER_MODEL = Deno.env.get("OPENROUTER_MODEL") || "openai/o3-mini-high"; // Model to use
+const OPENROUTER_MODEL =
+  Deno.env.get("OPENROUTER_MODEL") || "openai/o3-mini-high"; // Model to use
 const PERPLEXITY_API_KEY = Deno.env.get("PERPLEXITY_API_KEY") || ""; // Your Perplexity API key
 const SERVER_API_KEY = Deno.env.get("SERVER_API_KEY") || ""; // Optional: Secure web server
 
@@ -89,20 +90,25 @@ interface Tool {
 const tools: Tool[] = [
   {
     name: "PerplexitySonar",
-    description: "Uses Perplexity's Sonar Deep Research API to answer research questions/topics with AI-powered agents. Usage: PerplexitySonar[your question]",
+    description:
+      "Uses Perplexity's Sonar Deep Research API to answer research questions/topics with AI-powered agents. Usage: PerplexitySonar[your question]",
     run: async (input: string) => {
       try {
         const options = {
-          method: 'POST',
+          method: "POST",
           headers: {
-            'Authorization': `Bearer ${PERPLEXITY_API_KEY}`,
-            'Content-Type': 'application/json'
+            Authorization: `Bearer ${PERPLEXITY_API_KEY}`,
+            "Content-Type": "application/json",
           },
           body: JSON.stringify({
             model: PERPLEXITY_MODEL,
             messages: [
-              {role: "system", content: "Be precise and concise. Provide comprehensive, detailed answers with citations."},
-              {role: "user", content: input}
+              {
+                role: "system",
+                content:
+                  "Be precise and concise. Provide comprehensive, detailed answers with citations.",
+              },
+              { role: "user", content: input },
             ],
             max_tokens: PERPLEXITY_MAX_TOKENS,
             temperature: PERPLEXITY_TEMPERATURE,
@@ -111,16 +117,21 @@ const tools: Tool[] = [
             return_related_questions: false,
             stream: false,
             presence_penalty: 0,
-            frequency_penalty: 1
-          })
+            frequency_penalty: 1,
+          }),
         };
 
-        console.log(`Calling Perplexity API with input: "${input.substring(0, 100)}..."`);
-        const response = await fetch('https://api.perplexity.ai/chat/completions', options);
+        console.log(
+          `Calling Perplexity API with input: "${input.substring(0, 100)}..."`
+        );
+        const response = await fetch(
+          "https://api.perplexity.ai/chat/completions",
+          options
+        );
         if (!response.ok) {
           throw new Error(`Perplexity API error: ${response.status}`);
         }
-        
+
         const data = await response.json();
         const result = data.choices[0].message.content;
         console.log(`Perplexity API returned ${result.length} chars`);
@@ -129,19 +140,20 @@ const tools: Tool[] = [
         console.error("Perplexity API error:", err);
         return "Error: " + (err as Error).message;
       }
-    }
-  }
+    },
+  },
 ];
 
 // ===== SYSTEM PROMPT =====
 // Research-focused system prompt
 
 // Generate tool descriptions for the system prompt
-const toolDescriptions = tools.map(t => `${t.name}: ${t.description}`).join("\n");
+const toolDescriptions = tools
+  .map((t) => `${t.name}: ${t.description}`)
+  .join("\n");
 
 // The system prompt that instructs the model how to behave
-const systemPrompt = 
-`You are a research assistant, tasked with providing comprehensive, well-researched answers to questions.
+const systemPrompt = `You are a research assistant, tasked with providing comprehensive, well-researched answers to questions.
 
 You have access to the following tools:
 ${toolDescriptions}
@@ -174,35 +186,44 @@ let lastObservation = "";
 async function callOpenRouter(messages: ChatMessage[]): Promise<string> {
   try {
     console.log("Calling OpenRouter API...");
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: OPENROUTER_MODEL,
-        messages: messages,
-        stop: ["Observation:"],  // Stop generation before the model writes an observation
-        temperature: DEFAULT_TEMPERATURE,
-        max_tokens: MAX_TOKENS
-      })
-    });
-    
+    const response = await fetch(
+      "https://openrouter.ai/api/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: OPENROUTER_MODEL,
+          messages: messages,
+          stop: ["Observation:"], // Stop generation before the model writes an observation
+          temperature: DEFAULT_TEMPERATURE,
+          max_tokens: MAX_TOKENS,
+        }),
+      }
+    );
+
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`OpenRouter API error: HTTP ${response.status} - ${errorText}`);
-    } 
-    
+      throw new Error(
+        `OpenRouter API error: HTTP ${response.status} - ${errorText}`
+      );
+    }
+
     const data = await response.json();
     console.log(`OpenRouter API response received`);
-    
+
     const content: string | undefined = data.choices?.[0]?.message?.content;
-    if (!content || typeof content !== "string" || content.trim().length === 0) {
+    if (
+      !content ||
+      typeof content !== "string" ||
+      content.trim().length === 0
+    ) {
       console.error("Empty or invalid response from OpenRouter API");
       throw new Error("Empty or invalid response from LLM");
     }
-    
+
     return content;
   } catch (err) {
     console.error("Error calling OpenRouter:", err);
@@ -218,20 +239,20 @@ async function callOpenRouter(messages: ChatMessage[]): Promise<string> {
 async function runAgent(query: string): Promise<string> {
   const messages: ChatMessage[] = [
     { role: "system", content: systemPrompt },
-    { role: "user", content: query }
+    { role: "user", content: query },
   ];
 
   console.log(`Starting agent with query: "${query}"`);
   lastObservation = ""; // Reset the last observation
-  
+
   // The agent will iterate, allowing up to MAX_STEPS reasoning loops
   for (let step = 0; step < MAX_STEPS; step++) {
     console.log(`Step ${step + 1}/${MAX_STEPS}`);
-    
+
     try {
       // Call the LLM via OpenRouter
       const assistantReply = await callOpenRouter(messages);
-      
+
       if (!assistantReply || assistantReply.trim().length === 0) {
         console.log("Received empty reply from assistant, using fallback");
         if (lastObservation && lastObservation.length > 0) {
@@ -239,15 +260,21 @@ async function runAgent(query: string): Promise<string> {
           console.log("Using last observation as fallback answer");
           return `Based on research, here's what I found:\n\n${lastObservation}`;
         } else {
-          throw new Error("Empty response from assistant and no fallback available");
+          throw new Error(
+            "Empty response from assistant and no fallback available"
+          );
         }
       }
-      
-      console.log(`Assistant reply (${assistantReply.length} chars):\n${assistantReply.substring(0, 200)}...`);
-      
+
+      console.log(
+        `Assistant reply (${
+          assistantReply.length
+        } chars):\n${assistantReply.substring(0, 200)}...`
+      );
+
       // Append the assistant's reply to the message history
       messages.push({ role: "assistant", content: assistantReply });
-      
+
       // Check if the assistant's reply contains a final answer
       const answerMatch = assistantReply.match(/Answer:\s*([\s\S]*?)$/); // Use [\s\S] to match any character including newlines
       if (answerMatch) {
@@ -265,16 +292,20 @@ async function runAgent(query: string): Promise<string> {
           }
         }
       }
-      
+
       // Otherwise, look for an action to perform
-      const actionMatch = assistantReply.match(/Action:\s*([^\[]+)\[([^\]]+)\]/);
+      const actionMatch = assistantReply.match(
+        /Action:\s*([^\[]+)\[([^\]]+)\]/
+      );
       if (actionMatch) {
         const toolName = actionMatch[1].trim();
         const toolInput = actionMatch[2].trim();
         console.log(`Tool use: ${toolName}[${toolInput}]`);
-        
+
         // Find the tool by name (case-insensitive match)
-        const tool = tools.find(t => t.name.toLowerCase() === toolName.toLowerCase());
+        const tool = tools.find(
+          (t) => t.name.toLowerCase() === toolName.toLowerCase()
+        );
         let observation: string;
         if (!tool) {
           observation = `Tool "${toolName}" not found`;
@@ -288,46 +319,60 @@ async function runAgent(query: string): Promise<string> {
             observation = `Error: ${(err as Error).message}`;
           }
         }
-        console.log(`Observation (${observation.length} chars):\n${observation.substring(0, 200)}...`);
-        
+        console.log(
+          `Observation (${observation.length} chars):\n${observation.substring(
+            0,
+            200
+          )}...`
+        );
+
         // Append the observation as a system message for the next LLM call
-        messages.push({ role: "system", content: `Observation: ${observation}` });
+        messages.push({
+          role: "system",
+          content: `Observation: ${observation}`,
+        });
         // Continue loop for next reasoning step with the new observation in context
         continue;
       }
-      
+
       console.log("No Action or Answer found in reply, checking for fallback");
       // If no Action or Answer was found in the assistant's reply, check if we have a fallback
       if (lastObservation && lastObservation.length > 0) {
         console.log("Using last observation as fallback answer");
         return `Based on research, here's what I found:\n\n${lastObservation}`;
       }
-      
+
       // If we have no fallback, return the assistant's reply as is
       console.log("No fallback available, returning assistant reply as answer");
       return assistantReply.trim();
     } catch (err) {
       console.error(`Error in step ${step + 1}:`, err);
-      
+
       // If we have a fallback observation, use it instead of failing
       if (lastObservation && lastObservation.length > 0) {
-        console.log("Error occurred, using last observation as fallback answer");
+        console.log(
+          "Error occurred, using last observation as fallback answer"
+        );
         return `Based on research, here's what I found:\n\n${lastObservation}`;
       }
-      
+
       throw err;
     }
   }
-  
+
   console.error("Agent did not produce a final answer within the step limit");
-  
+
   // If we have a fallback observation, use it instead of failing
   if (lastObservation && lastObservation.length > 0) {
-    console.log("Step limit reached, using last observation as fallback answer");
+    console.log(
+      "Step limit reached, using last observation as fallback answer"
+    );
     return `Based on research, here's what I found:\n\n${lastObservation}`;
   }
-  
-  throw new Error("Agent did not produce a final answer within the step limit.");
+
+  throw new Error(
+    "Agent did not produce a final answer within the step limit."
+  );
 }
 
 // ===== OUTPUT HANDLING =====
@@ -339,10 +384,11 @@ async function runAgent(query: string): Promise<string> {
  */
 function generateFilename(): string {
   const now = new Date();
-  const timestamp = now.toISOString()
-    .replace(/T/, '-')
-    .replace(/\..+/, '')
-    .replace(/:/g, '-');
+  const timestamp = now
+    .toISOString()
+    .replace(/T/, "-")
+    .replace(/\..+/, "")
+    .replace(/:/g, "-");
   const uuid = crypto.randomUUID();
   return `${timestamp}-${uuid}.md`;
 }
@@ -354,7 +400,9 @@ function generateFilename(): string {
  * @returns A formatted markdown string
  */
 function formatMarkdown(query: string, answer: string): string {
-  return `# Research: ${query}\n\n${answer}\n\n${INCLUDE_TIMESTAMP ? `*Generated on ${new Date().toLocaleString()}*` : ''}`;
+  return `# Research: ${query}\n\n${answer}\n\n${
+    INCLUDE_TIMESTAMP ? `*Generated on ${new Date().toLocaleString()}*` : ""
+  }`;
 }
 
 /**
@@ -362,7 +410,10 @@ function formatMarkdown(query: string, answer: string): string {
  * @param content The content to write
  * @param filename The filename to write to
  */
-async function writeMarkdownFile(content: string, filename: string): Promise<void> {
+async function writeMarkdownFile(
+  content: string,
+  filename: string
+): Promise<void> {
   await Deno.writeTextFile(filename, content);
 }
 
@@ -375,7 +426,7 @@ async function writeMarkdownFile(content: string, filename: string): Promise<voi
  */
 async function runCliMode(query: string): Promise<void> {
   console.log(`Running in CLI mode with query: "${query}"`);
-  
+
   try {
     // Check if API keys are set
     if (!OPENROUTER_API_KEY) {
@@ -388,20 +439,20 @@ async function runCliMode(query: string): Promise<void> {
       console.error("Please set it with: export PERPLEXITY_API_KEY=your_key");
       Deno.exit(1);
     }
-    
+
     console.log("Starting research agent...");
     const answer = await runAgent(query);
     console.log(`Got answer (${answer.length} chars)`);
-    
+
     const filename = generateFilename();
     console.log(`Generated filename: ${filename}`);
-    
+
     const markdown = formatMarkdown(query, answer);
     console.log(`Formatted markdown (${markdown.length} chars)`);
-    
+
     await writeMarkdownFile(markdown, filename);
     console.log(`Wrote markdown to file: ${filename}`);
-    
+
     // Echo just the filename for easy use in scripts
     console.log(filename);
   } catch (err) {
@@ -416,77 +467,92 @@ async function runCliMode(query: string): Promise<void> {
  */
 function startWebServer(): void {
   if (!SERVER_MODE_ENABLED) return;
-  
+
   console.log(`Starting web server on port ${PORT}...`);
-  
-  serve(async (req: Request) => {
-    // Check for API key if SERVER_API_KEY is set
-    if (SERVER_API_KEY) {
-      const authHeader = req.headers.get("Authorization");
-      const apiKey = authHeader?.startsWith("Bearer ") 
-        ? authHeader.substring(7) 
-        : null;
-      
-      if (apiKey !== SERVER_API_KEY) {
-        return new Response(JSON.stringify({ 
-          error: "Unauthorized: Invalid or missing API key" 
-        }), {
-          status: 401,
-          headers: { "Content-Type": "application/json" }
+
+  serve(
+    async (req: Request) => {
+      // Check for API key if SERVER_API_KEY is set
+      if (SERVER_API_KEY) {
+        const authHeader = req.headers.get("Authorization");
+        const apiKey = authHeader?.startsWith("Bearer ")
+          ? authHeader.substring(7)
+          : null;
+
+        if (apiKey !== SERVER_API_KEY) {
+          return new Response(
+            JSON.stringify({
+              error: "Unauthorized: Invalid or missing API key",
+            }),
+            {
+              status: 401,
+              headers: { "Content-Type": "application/json" },
+            }
+          );
+        }
+      }
+
+      if (req.method === "GET") {
+        return new Response(
+          JSON.stringify({
+            message: "Welcome to the Research Agent API",
+            usage:
+              'Send a POST request with JSON body: { "query": "your research question" }' +
+              (SERVER_API_KEY
+                ? " Include your API key in the Authorization header: 'Authorization: Bearer your-api-key'"
+                : ""),
+          }),
+          {
+            headers: { "Content-Type": "application/json" },
+          }
+        );
+      }
+
+      if (req.method !== "POST") {
+        return new Response(JSON.stringify({ error: "Method Not Allowed" }), {
+          status: 405,
+          headers: { "Content-Type": "application/json" },
         });
       }
-    }
 
-    if (req.method === "GET") {
-      return new Response(JSON.stringify({
-        message: "Welcome to the Research Agent API",
-        usage: "Send a POST request with JSON body: { \"query\": \"your research question\" }" + 
-              (SERVER_API_KEY ? " Include your API key in the Authorization header: 'Authorization: Bearer your-api-key'" : "")
-      }), {
-        headers: { "Content-Type": "application/json" }
-      });
-    }
-    
-    if (req.method !== "POST") {
-      return new Response(JSON.stringify({ error: "Method Not Allowed" }), {
-        status: 405,
-        headers: { "Content-Type": "application/json" }
-      });
-    }
-    
-    let query: string;
-    try {
-      const data = await req.json();
-      query = data.query ?? data.question;
-    } catch {
-      return new Response(JSON.stringify({ error: "Invalid JSON body" }), {
-        status: 400,
-        headers: { "Content-Type": "application/json" }
-      });
-    }
-    
-    if (!query || typeof query !== "string") {
-      return new Response(JSON.stringify({ error: "Missing query parameter" }), {
-        status: 400,
-        headers: { "Content-Type": "application/json" }
-      });
-    }
-    
-    try {
-      const answer = await runAgent(query);
-      const responseData = { query, answer };
-      return new Response(JSON.stringify(responseData), {
-        headers: { "Content-Type": "application/json" }
-      });
-    } catch (err) {
-      console.error("Agent error:", err);
-      const errorMsg = (err as Error).message || String(err);
-      return new Response(JSON.stringify({ error: errorMsg }), {
-        status: 500,
-        headers: { "Content-Type": "application/json" }
-      });
-    }
-  }, { port: PORT });
+      let query: string;
+      try {
+        const data = await req.json();
+        query = data.query ?? data.question;
+      } catch {
+        return new Response(JSON.stringify({ error: "Invalid JSON body" }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      if (!query || typeof query !== "string") {
+        return new Response(
+          JSON.stringify({ error: "Missing query parameter" }),
+          {
+            status: 400,
+            headers: { "Content-Type": "application/json" },
+          }
+        );
+      }
+
+      try {
+        const answer = await runAgent(query);
+        const responseData = { query, answer };
+        return new Response(JSON.stringify(responseData), {
+          headers: { "Content-Type": "application/json" },
+        });
+      } catch (err) {
+        console.error("Agent error:", err);
+        const errorMsg = (err as Error).message || String(err);
+        return new Response(JSON.stringify({ error: errorMsg }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+    },
+    { port: PORT }
+  );
 }
 
 // ===== ENTRY POINT =====
