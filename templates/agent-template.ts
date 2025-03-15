@@ -49,6 +49,9 @@ const SERVER_MODE_ENABLED = true; // Set to false to disable web server mode
 const MAX_STEPS = 10; // Maximum reasoning steps
 const DEFAULT_TEMPERATURE = 0.0; // Temperature for LLM calls
 const MAX_TOKENS = 4000; // Maximum tokens for responses
+const MAX_RETRIES = 3; // Maximum number of retries for failed API calls
+const RETRY_DELAY_MS = 1000; // Delay between retries in milliseconds
+const API_TIMEOUT_MS = 60000; // API call timeout in milliseconds (60 seconds)
 
 // Output Configuration
 const OUTPUT_FORMAT = "markdown"; // Output format (markdown, json, text)
@@ -103,13 +106,14 @@ const tools: Tool[] = [
     description: "Performs mathematical calculations. Usage: Calculator[2 + 2]",
     run: (input: string) => {
       try {
-        // Simple eval for calculations (be careful with this in production)
+        // SECURITY WARNING: Never use eval() in production!
+        // This is just a simple example. Use a proper math library instead.
         return String(eval(input));
       } catch (err) {
         return "Error: " + (err as Error).message;
       }
     }
-  },
+  }
   */
 ];
 
@@ -121,7 +125,7 @@ const toolDescriptions = tools.map(t => `${t.name}: ${t.description}`).join("\n"
 
 // The system prompt that instructs the model how to behave
 const systemPrompt = 
-`You are a helpful assistant that can use tools to answer questions and perform tasks.
+`You are a helpful assistant that can use tools to answer the user's questions.
 
 You have access to the following tools:
 ${toolDescriptions}
@@ -146,47 +150,99 @@ You MUST use at least one tool before providing your final answer.
 let lastObservation = "";
 
 /**
- * Calls the language model API with the given messages.
+ * Calls the LLM API with retry logic.
  * @param messages - Array of chat messages to send to the LLM
  * @returns The model's response text
  */
 async function callLLM(messages: ChatMessage[]): Promise<string> {
-  try {
-    console.log("Calling LLM API...");
-    const response = await fetch(LLM_API_URL, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${LLM_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: LLM_MODEL,
-        messages: messages,
-        stop: ["Observation:"],  // Stop generation before the model writes an observation
-        temperature: DEFAULT_TEMPERATURE,
-        max_tokens: MAX_TOKENS
-      })
-    });
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`LLM API error: HTTP ${response.status} - ${errorText}`);
-    } 
-    
-    const data = await response.json();
-    console.log(`LLM API response received`);
-    
-    const content: string | undefined = data.choices?.[0]?.message?.content;
-    if (!content || typeof content !== "string" || content.trim().length === 0) {
-      console.error("Empty or invalid response from LLM API");
-      throw new Error("Empty or invalid response from LLM");
+  let retries = 0;
+  
+  while (retries <= MAX_RETRIES) {
+    try {
+      console.log(`Calling LLM API (attempt ${retries + 1}/${MAX_RETRIES + 1})...`);
+      
+      // Create an AbortController for timeout handling
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+      
+      try {
+        const response = await fetch(LLM_API_URL, {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${LLM_API_KEY}`,
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/jwynia/aidant-monobots", // Identify your app
+            "X-Title": "Aidant Agent", // Name your agent
+          },
+          body: JSON.stringify({
+            model: LLM_MODEL,
+            messages: messages,
+            temperature: DEFAULT_TEMPERATURE,
+            max_tokens: MAX_TOKENS
+          }),
+          signal: controller.signal
+        });
+        
+        clearTimeout(timeoutId);
+        
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error(`API error (${response.status}): ${errorText}`);
+          
+          if (response.status === 429 || response.status >= 500) {
+            // Retry on rate limit or server errors
+            retries++;
+            if (retries <= MAX_RETRIES) {
+              console.log(`Retrying in ${RETRY_DELAY_MS * retries}ms...`);
+              await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS * retries));
+              continue;
+            }
+          }
+          
+          throw new Error(`API error (${response.status}): ${errorText}`);
+        }
+        
+        const data = await response.json();
+        console.log(`LLM API response received`);
+        
+        const content: string | undefined = data.choices?.[0]?.message?.content;
+        if (!content || typeof content !== "string" || content.trim().length === 0) {
+          console.error("Empty or invalid response from LLM API");
+          
+          // Retry on empty responses
+          retries++;
+          if (retries <= MAX_RETRIES) {
+            console.log(`Retrying in ${RETRY_DELAY_MS * retries}ms...`);
+            await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS * retries));
+            continue;
+          }
+          
+          throw new Error("Empty or invalid response from LLM");
+        }
+        
+        return content;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    } catch (err: unknown) {
+      console.error(`Error calling LLM API:`, err);
+      
+      if ((err as Error).name === 'AbortError') {
+        console.error(`LLM API call timed out after ${API_TIMEOUT_MS}ms`);
+      }
+      
+      retries++;
+      if (retries <= MAX_RETRIES) {
+        console.log(`Retrying in ${RETRY_DELAY_MS * retries}ms...`);
+        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS * retries));
+        continue;
+      }
+      
+      throw err;
     }
-    
-    return content;
-  } catch (err) {
-    console.error("Error calling LLM:", err);
-    throw err;
   }
+  
+  throw new Error(`Failed to call LLM API after ${MAX_RETRIES + 1} attempts`);
 }
 
 /**
@@ -202,6 +258,7 @@ async function runAgent(query: string): Promise<string> {
 
   console.log(`Starting agent with query: "${query}"`);
   lastObservation = ""; // Reset the last observation
+  let partialAnswer = ""; // Store partial answers in case of premature termination
   
   // The agent will iterate, allowing up to MAX_STEPS reasoning loops
   for (let step = 0; step < MAX_STEPS; step++) {
@@ -217,6 +274,10 @@ async function runAgent(query: string): Promise<string> {
           // If we have a previous observation, use it as the answer
           console.log("Using last observation as fallback answer");
           return `Based on my analysis, here's what I found:\n\n${lastObservation}`;
+        } else if (partialAnswer && partialAnswer.length > 0) {
+          // If we have a partial answer, use it
+          console.log("Using partial answer as fallback");
+          return `Based on partial analysis, here's what I found:\n\n${partialAnswer}`;
         } else {
           throw new Error("Empty response from assistant and no fallback available");
         }
@@ -241,8 +302,20 @@ async function runAgent(query: string): Promise<string> {
             // If we have a previous observation, use it as the answer
             console.log("Using last observation as fallback answer");
             return `Based on my analysis, here's what I found:\n\n${lastObservation}`;
+          } else if (partialAnswer && partialAnswer.length > 0) {
+            // If we have a partial answer, use it
+            console.log("Using partial answer as fallback");
+            return `Based on partial analysis, here's what I found:\n\n${partialAnswer}`;
           }
         }
+      }
+      
+      // Look for a Thought section to capture as a partial answer
+      const thoughtMatch = assistantReply.match(/Thought:\s*([\s\S]*?)(?=\n\n|$)/);
+      if (thoughtMatch && thoughtMatch[1].trim().length > 0) {
+        // Store the thought as a potential partial answer
+        partialAnswer = `${partialAnswer}\n\n${thoughtMatch[1].trim()}`;
+        console.log(`Updated partial answer (${partialAnswer.length} chars)`);
       }
       
       // Otherwise, look for an action to perform
@@ -280,6 +353,10 @@ async function runAgent(query: string): Promise<string> {
       if (lastObservation && lastObservation.length > 0) {
         console.log("Using last observation as fallback answer");
         return `Based on my analysis, here's what I found:\n\n${lastObservation}`;
+      } else if (partialAnswer && partialAnswer.length > 0) {
+        // If we have a partial answer, use it
+        console.log("Using partial answer as fallback");
+        return `Based on partial analysis, here's what I found:\n\n${partialAnswer}`;
       }
       
       // If we have no fallback, return the assistant's reply as is
@@ -292,6 +369,10 @@ async function runAgent(query: string): Promise<string> {
       if (lastObservation && lastObservation.length > 0) {
         console.log("Error occurred, using last observation as fallback answer");
         return `Based on my analysis, here's what I found:\n\n${lastObservation}`;
+      } else if (partialAnswer && partialAnswer.length > 0) {
+        // If we have a partial answer, use it
+        console.log("Error occurred, using partial answer as fallback");
+        return `Based on partial analysis, here's what I found:\n\n${partialAnswer}`;
       }
       
       throw err;
@@ -304,6 +385,10 @@ async function runAgent(query: string): Promise<string> {
   if (lastObservation && lastObservation.length > 0) {
     console.log("Step limit reached, using last observation as fallback answer");
     return `Based on my analysis, here's what I found:\n\n${lastObservation}`;
+  } else if (partialAnswer && partialAnswer.length > 0) {
+    // If we have a partial answer, use it
+    console.log("Step limit reached, using partial answer as fallback");
+    return `Based on partial analysis, here's what I found:\n\n${partialAnswer}`;
   }
   
   throw new Error("Agent did not produce a final answer within the step limit.");
