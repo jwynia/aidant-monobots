@@ -1,88 +1,92 @@
-# Web Scraping Agents
+# Research Agent
 
-Single file LLM-powered ReACT agents, built with Deno and powered by OpenRouter LLMs. Inspired by/based on https://github.com/ruvnet/hello_world_agent/tree/main by @ruvnet.
+A research agent that uses local storage and external APIs to provide comprehensive answers to research questions.
+
+## Project Structure
+
+- `agents/research-agent.ts`: The main Deno-based research agent that can be run as a CLI tool or web server
+- `agents/research-storage.ts`: A Node.js compatible module for managing research storage
+- `agents/research-agent.test.ts`: Unit tests for the research storage system
 
 ## Features
-- 🧠 ReACT (Reasoning + Acting) pattern for intelligent decision making
-- 🌐 Dual-mode operation (CLI and web server)
-- 🎯 Automatic selector generation and testing
-- 📊 Confidence scoring for selector recommendations
-- 🔄 Error handling with fallback mechanisms
-- 📝 Markdown output formatting
-- 🔍 Deep research capabilities with Perplexity Sonar integration
-- 🌍 Web scraping with Puppeteer
 
-## Implemented Agents
+- Local storage of research in a `.research` folder in the user's home directory
+- Similarity-based search to find relevant previous research
+- Topic graph for linking related research
+- Fallback to external APIs (Perplexity) when local research is not available
+- Markdown output with frontmatter metadata
 
-### CSS Selector Finder
-A specialized agent that analyzes web pages and generates optimal CSS selectors for extracting specific content. Features include:
-- Automatic selector generation and testing
-- Confidence scoring for recommendations
-- Multiple selector strategy suggestions
-- Puppeteer integration for real-time testing
+## Setup
 
-### Research Agent
-A powerful research assistant that leverages the Perplexity Sonar API for deep research capabilities:
-- Comprehensive web research with citations
-- Markdown output with properly formatted references
-- Deployable to serverless environments (Fly.io, Supabase Edge Functions)
-
-## Agent Template
-
-The project includes a robust agent template (`templates/agent-template.ts`) that can be used as a foundation for creating new agents. The template includes:
-
-- ⚡ Retry logic for API calls with exponential backoff
-- ⏱️ Timeout handling for API requests
-- 🧩 Partial answer collection to prevent incomplete results
-- 🛡️ Improved error handling and fallback mechanisms
-- 🧹 Proper resource cleanup
-- 🔄 ReACT pattern implementation (Thought → Action → Observation loop)
-
-## Prerequisites
-
-- [Deno](https://deno.land/) runtime
-- [OpenRouter](https://openrouter.ai/) API key
-- [Perplexity](https://www.perplexity.ai/) API key (for Research Agent)
-
-## Installation
+### Dependencies
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/web-scraping-agents.git
-cd web-scraping-agents
-
-# Set up environment variables
-export OPENROUTER_API_KEY="your_openrouter_api_key"
-export PERPLEXITY_API_KEY="your_perplexity_api_key" # For Research Agent
-export OPENROUTER_MODEL="openai/o3-mini-high" # Optional, defaults to o3-mini-high
-
-# Run an agent (CSS Selector Finder example)
-deno run --allow-read --allow-write --allow-net --allow-env --allow-run --allow-sys agents/css-selector-finder.ts "How do I extract product titles and prices from https://example.com/products"
-
-# Install agents globally
-deno install --allow-read --allow-write --allow-net --allow-env --allow-run --allow-sys --global --name css-selector-finder agents/css-selector-finder.ts
-deno install --allow-read --allow-write --allow-net --allow-env --allow-run --global --name research agents/research-agent.ts
+npm install uuid @types/node @types/uuid
 ```
+
+### Environment Variables
+
+- `OPENROUTER_API_KEY`: Your OpenRouter API key
+- `PERPLEXITY_API_KEY`: Your Perplexity API key
+- `OPENROUTER_MODEL` (optional): Model to use (default is "openai/o3-mini-high")
+- `SERVER_API_KEY` (optional): Secure web server
+- `PORT` (optional): Web server port (default is 8000)
+- `OUTPUT_DIR` (optional): Directory to store output files (default is "output")
 
 ## Usage
 
-### CSS Selector Finder
-```bash
-# CLI mode
-css-selector-finder "How do I extract product titles and prices from https://example.com/products"
+### Running the Agent (Deno)
 
-# Web server mode
-# Send POST request to http://localhost:8001 with JSON body: { "query": "How do I extract product titles and prices from https://example.com/products" }
+```bash
+deno run --allow-read --allow-write --allow-net --allow-env --allow-run agents/research-agent.ts "What caused the fall of the Roman Republic?"
 ```
 
-### Research Agent
+### Installing as a Command (Deno)
+
 ```bash
-# CLI mode
+deno install --allow-read --allow-write --allow-net --allow-env --allow-run --global --name research agents/research-agent.ts
+```
+
+Then use:
+
+```bash
 research "What caused the fall of the Roman Republic?"
-
-# Web server mode
-# Send POST request to http://localhost:8000 with JSON body: { "query": "What caused the fall of the Roman Republic?" }
 ```
 
-## License
-MIT
+### Running Tests (Node.js)
+
+```bash
+npm test
+```
+
+## How It Works
+
+1. When a query is received, the agent first checks the local research storage for similar queries
+2. If similar research is found, it returns the stored result
+3. If no similar research is found, it uses the Perplexity API to perform new research
+4. The result is stored in the local research storage for future use
+5. The agent outputs the result as a markdown file
+
+## Storage Structure
+
+- `.research/`: Root directory for research storage
+  - `topics/`: Directory containing markdown files with research content
+  - `index.json`: Index of all research entries with metadata
+  - `graph.json`: Topic graph for linking related research
+
+## Development
+
+### Running Tests
+
+```bash
+node --test agents/research-agent.test.ts
+```
+
+### Building for Production
+
+The research agent is designed to be run in a Deno environment. For production deployment, you can use:
+
+- **Fly.io**: Create a Dockerfile using a Deno base image
+- **Supabase Edge Functions**: Deploy as a Supabase Edge Function
+
+See the comments in `agents/research-agent.ts` for detailed deployment instructions.

@@ -42,9 +42,21 @@
  */
 
 import { serve } from "https://deno.land/std@0.192.0/http/server.ts";
+import { join } from "https://deno.land/std@0.192.0/path/mod.ts";
+import { ensureDir } from "https://deno.land/std@0.192.0/fs/ensure_dir.ts";
+
+import { ResearchStorage } from '../lib/research-storage.ts';
 
 // ===== CONFIGURATION =====
 // Modify these settings to customize your agent
+
+// Research Storage Configuration
+const HOME_DIR = Deno.env.get("HOME") || Deno.env.get("USERPROFILE") || "";
+const RESEARCH_DIR = join(HOME_DIR, ".research");
+const RESEARCH_TOPICS_DIR = join(RESEARCH_DIR, "topics");
+const RESEARCH_INDEX_PATH = join(RESEARCH_DIR, "index.json");
+const RESEARCH_GRAPH_PATH = join(RESEARCH_DIR, "graph.json");
+const SIMILARITY_THRESHOLD = 0.7; // Threshold for considering queries similar
 
 // API Keys and Endpoints
 const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY") || ""; // Your OpenRouter API key
@@ -76,6 +88,16 @@ const PERPLEXITY_TEMPERATURE = 0.2; // Temperature for Perplexity calls
 // Output Configuration
 // INCLUDE_TIMESTAMP is already defined above
 
+// ===== RESEARCH STORAGE =====
+// Create singleton instance of ResearchStorage
+const researchStorage = new ResearchStorage({
+  researchDir: RESEARCH_DIR,
+  topicsDir: RESEARCH_TOPICS_DIR,
+  indexPath: RESEARCH_INDEX_PATH,
+  graphPath: RESEARCH_GRAPH_PATH,
+  similarityThreshold: SIMILARITY_THRESHOLD
+});
+
 // ===== INTERFACE DEFINITIONS =====
 // These define the structure of messages and tools
 
@@ -94,6 +116,66 @@ interface Tool {
 // Research tools for the agent to use
 
 const tools: Tool[] = [
+  {
+    name: "SearchResearchStorage",
+    description:
+      "Searches the local research storage for previous research on a topic. Usage: SearchResearchStorage[your search query]",
+    run: async (input: string) => {
+      try {
+        console.log(`Searching research storage for: "${input}"`);
+        const similarEntries = await researchStorage.findSimilarResearch(input);
+        
+        if (similarEntries.length === 0) {
+          return "No relevant research found in storage.";
+        }
+        
+        // Format the results
+        let result = `Found ${similarEntries.length} relevant research entries:\n\n`;
+        
+        for (let i = 0; i < Math.min(similarEntries.length, 5); i++) {
+          const entry = similarEntries[i];
+          const content = await researchStorage.getResearchById(entry.id);
+          const extractedContent = content ? researchStorage.extractContent(content) : "Content not available";
+          
+          // Add a summary of this entry
+          result += `## ${i + 1}. ${entry.query}\n`;
+          result += `Topics: ${entry.topics.join(", ")}\n`;
+          result += `Created: ${new Date(entry.created).toLocaleString()}\n\n`;
+          
+          // Add a snippet of the content (first 300 chars)
+          const snippet = extractedContent.length > 300 
+            ? extractedContent.substring(0, 300) + "..." 
+            : extractedContent;
+          result += `${snippet}\n\n`;
+        }
+        
+        return result;
+      } catch (err) {
+        console.error("Error searching research storage:", err);
+        return "Error: " + (err as Error).message;
+      }
+    }
+  },
+  {
+    name: "GetResearchById",
+    description:
+      "Retrieves a specific research entry by its ID. Usage: GetResearchById[id]",
+    run: async (input: string) => {
+      try {
+        console.log(`Retrieving research with ID: "${input}"`);
+        const content = await researchStorage.getResearchById(input);
+        
+        if (!content) {
+          return "Research entry not found.";
+        }
+        
+        return researchStorage.extractContent(content);
+      } catch (err) {
+        console.error("Error retrieving research:", err);
+        return "Error: " + (err as Error).message;
+      }
+    }
+  },
   {
     name: "PerplexitySonar",
     description:
@@ -165,6 +247,9 @@ You have access to the following tools:
 ${toolDescriptions}
 
 When answering the user, you MUST use the tools to access research information to build your research report.
+
+IMPORTANT: Always check the local research storage FIRST before using external APIs. This helps save time and resources by reusing previous research.
+
 Follow this format strictly:
 Thought: <your reasoning here>
 Action: <ToolName>[<tool input>]
@@ -176,6 +261,11 @@ Answer: <your final answer to the user's query>
 Your final answer MUST begin with "Answer: " and should be comprehensive and detailed.
 Only provide one action at a time, and wait for the observation before continuing.
 You MUST use at least one tool before providing your final answer.
+
+Recommended workflow:
+1. First use SearchResearchStorage to check if we already have research on this topic
+2. If relevant research is found, use GetResearchById to retrieve the full content
+3. Only if no relevant research is found, use PerplexitySonar to perform new research
 `;
 
 // ===== LLM INTEGRATION =====
@@ -254,6 +344,41 @@ async function callOpenRouter(messages: ChatMessage[]): Promise<string> {
  * @returns The final answer from the agent.
  */
 async function runAgent(query: string): Promise<string> {
+  // First, check if we have similar research in storage
+  try {
+    console.log("Checking research storage for similar queries...");
+    const similarEntries = await researchStorage.findSimilarResearch(query);
+    
+    if (similarEntries.length > 0) {
+      console.log(`Found ${similarEntries.length} similar research entries`);
+      const mostSimilar = similarEntries[0]; // Get the most similar entry (first in sorted array)
+      console.log(`Using most similar entry: "${mostSimilar.query}"`);
+      
+      // Retrieve the full content
+      const content = await researchStorage.getResearchById(mostSimilar.id);
+      if (content) {
+        // Extract just the content (without frontmatter)
+        const extractedContent = researchStorage.extractContent(content);
+        console.log(`Retrieved content (${extractedContent.length} chars)`);
+        
+        // Get related research for context
+        const relatedEntries = await researchStorage.getRelatedResearch(mostSimilar.id);
+        if (relatedEntries.length > 0) {
+          console.log(`Found ${relatedEntries.length} related research entries`);
+          // We could use these for additional context if needed
+        }
+        
+        return `Based on previous research, here's what I found:\n\n${extractedContent}\n\n*Note: This answer was retrieved from research storage.*`;
+      }
+    } else {
+      console.log("No similar research found in storage, proceeding with new research");
+    }
+  } catch (err) {
+    console.error("Error checking research storage:", err);
+    console.log("Proceeding with new research");
+  }
+  
+  // If we reach here, we need to perform new research
   const messages: ChatMessage[] = [
     { role: "system", content: systemPrompt },
     { role: "user", content: query },
@@ -472,6 +597,19 @@ async function writeMarkdownFile(
     
     const filePath = `${OUTPUT_DIR}/${filename}`;
     await Deno.writeTextFile(filePath, content);
+    
+    // Also store in research storage
+    try {
+      const match = content.match(/^# Research: (.*?)\n\n([\s\S]*)$/);
+      if (match) {
+        const query = match[1];
+        await researchStorage.storeResearch(query, content);
+        console.log("Research stored in .research directory");
+      }
+    } catch (err) {
+      console.error("Error storing research:", err);
+      // Continue even if research storage fails
+    }
   } catch (err) {
     console.error(`Error writing file: ${err}`);
     throw err;
